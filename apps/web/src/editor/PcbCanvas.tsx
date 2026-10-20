@@ -1,6 +1,13 @@
 import {
   addTrace,
   addVia,
+  addZone,
+  boardOutlineZone,
+  copperLayers,
+  deleteZone,
+  netRules,
+  pointInPolygon,
+  zoneCutouts,
   analyzeCopper,
   autoPlace,
   autoRoute,
@@ -29,11 +36,12 @@ import { publishCursor, type PresenceState } from "./presence";
 import { ShapeEl } from "./render";
 import { beginPan, useViewport } from "./viewport";
 
-const LAYER_COLOR: Record<CopperLayer, string> = { top: "#d9534f", bottom: "#4a7fe0" };
-const PAD_COLOR: Record<CopperLayer | "tht", string> = { top: "#e0a83a", bottom: "#4f8fe6", tht: "#d9a53a" };
+export const LAYER_COLOR: Record<CopperLayer, string> = { top: "#d9534f", in1: "#d98b2b", in2: "#2fb39a", bottom: "#4a7fe0" };
+const PAD_COLOR: Record<CopperLayer | "tht", string> = { top: "#e0a83a", in1: "#d98b2b", in2: "#2fb39a", bottom: "#4f8fe6", tht: "#d9a53a" };
+const LAYER_NAME: Record<CopperLayer, string> = { top: "Top", in1: "Inner 1", in2: "Inner 2", bottom: "Bottom" };
 const SNAP = 0.05;
 
-type Tool = "select" | "route" | "via";
+type Tool = "select" | "route" | "via" | "zone";
 
 interface Routing {
   layer: CopperLayer;
@@ -63,7 +71,14 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
   const [width, setWidth] = useState(design.board.defaultTraceWidth);
   const [routing, setRouting] = useState<Routing | null>(null);
   const [cursor, setCursor] = useState<Vec>({ x: 0, y: 0 });
-  const [show, setShow] = useState({ top: true, bottom: true, silk: true, rats: true, drc: true });
+  const [show, setShow] = useState({ top: true, in1: true, in2: true, bottom: true, zones: true, silk: true, rats: true, drc: true });
+  const [zoneDraft, setZoneDraft] = useState<Vec[] | null>(null);
+  const layers = copperLayers(design.board);
+  const namedNets = useMemo(() => nets.filter((n) => n.terminals.length > 1).map((n) => n.name), [nets]);
+  const [zoneNet, setZoneNet] = useState<string>("GND");
+  useEffect(() => {
+    if (!layers.includes(layer)) setLayer("top");
+  }, [layers, layer]);
   const drag = useRef<{ id: string; start: Vec; orig: Vec } | null>(null);
   const fitted = useRef(false);
 
@@ -113,13 +128,30 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     setRouting(null);
   };
 
+  const finishZone = (pts: Vec[] | null) => {
+    if (pts && pts.length >= 3) {
+      undo.stopCapturing();
+      addZone(doc, { net: zoneNet, layer, points: pts });
+      toast(`Copper pour for ${zoneNet} added on ${LAYER_NAME[layer]}`);
+    }
+    setZoneDraft(null);
+  };
+
+  const pourBoard = () => {
+    if (!zoneNet) return toast("Choose a net for the pour");
+    undo.stopCapturing();
+    addZone(doc, { net: zoneNet, layer, points: boardOutlineZone(design.board) });
+    toast(`${zoneNet} pour added on ${LAYER_NAME[layer]}`);
+  };
+
   const switchLayer = () => {
-    const next: CopperLayer = layer === "top" ? "bottom" : "top";
+    const next: CopperLayer = layers[(layers.indexOf(layer) + 1) % layers.length];
     if (routing && routing.points.length >= 1) {
       const last = routing.points[routing.points.length - 1];
+      const rules = netRules(design, routing.net);
       doc.transact(() => {
         if (routing.points.length >= 2) addTrace(doc, { layer: routing.layer, width: routing.width, points: routing.points });
-        addVia(doc, last);
+        addVia(doc, last, rules.viaDiameter, rules.viaDrill);
       });
       setRouting({ ...routing, layer: next, points: [last] });
     }
@@ -132,15 +164,18 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       const k = e.key.toLowerCase();
       if (e.metaKey || e.ctrlKey) return;
       if (e.key === "Escape") {
-        if (routing) finishRoute(routing);
+        if (zoneDraft) finishZone(zoneDraft);
+        else if (routing) finishRoute(routing);
         else {
           setTool("select");
           select(null);
         }
-      } else if (e.key === "Enter" && routing) finishRoute(routing);
+      } else if (e.key === "Enter" && zoneDraft) finishZone(zoneDraft);
+      else if (e.key === "Enter" && routing) finishRoute(routing);
       else if ((e.key === "Delete" || e.key === "Backspace") && selection) {
         if (selection.kind === "trace") deleteTrace(doc, selection.id);
         if (selection.kind === "via") deleteVia(doc, selection.id);
+        if (selection.kind === "zone") deleteZone(doc, selection.id);
         select(null);
       } else if (k === "r" && selection?.kind === "component") {
         const c = byId.get(selection.id);
@@ -152,6 +187,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       else if (k === "x") setTool("route");
       else if (k === "v") setTool("via");
       else if (k === "s") setTool("select");
+      else if (k === "p") setTool("zone");
       else if (k === "l") switchLayer();
     };
     window.addEventListener("keydown", onKey);
@@ -173,6 +209,10 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     }
     const comps = [...design.components].filter((c) => getPart(c.partId)?.footprint).sort((a, b) => Number(b.pcb.side === layer) - Number(a.pcb.side === layer));
     for (const c of comps) if (inRect(p, courtyardRect(c)!)) return { kind: "component", id: c.id };
+    if (show.zones) {
+      const zs = [...design.zones].sort((a, b) => Number(b.layer === layer) - Number(a.layer === layer));
+      for (const z of zs) if (show[z.layer] && pointInPolygon(p, z.points)) return { kind: "zone", id: z.id };
+    }
     return null;
   };
 
@@ -197,13 +237,21 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       addVia(doc, snapped(raw));
       return;
     }
+    if (tool === "zone") {
+      const p = snapped(raw);
+      if (e.detail >= 2 && zoneDraft) return finishZone(zoneDraft);
+      setZoneDraft([...(zoneDraft ?? []), p]);
+      return;
+    }
     if (tool === "route") {
       const pad = padAt(raw);
       if (!routing) {
         if (!pad) return toast("Start a trace on a pad");
         const l = pad.layers.includes(layer) ? layer : pad.layers[0];
         if (l !== layer) setLayer(l);
-        setRouting({ layer: l, width, points: [pad.world], net: netOfPad(pad) });
+        const net = netOfPad(pad);
+        const rules = netRules(design, net);
+        setRouting({ layer: l, width: rules.className === "Default" ? width : rules.traceWidth, points: [pad.world], net });
         return;
       }
       const p = routeTarget(raw, e.shiftKey);
@@ -252,7 +300,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     const r = autoRoute(design, { width });
     doc.transact(() => {
       for (const t of r.traces) addTrace(doc, t);
-      for (const v of r.vias) addVia(doc, v);
+      for (const v of r.vias) addVia(doc, v, v.diameter, v.drill);
     });
     toast(`Routed ${r.routed} connection${r.routed === 1 ? "" : "s"} with ${r.vias.length} via${r.vias.length === 1 ? "" : "s"} in ${Math.round(performance.now() - t0)}ms${r.failed.length ? ` · ${r.failed.length} failed` : ""}`);
   };
@@ -264,7 +312,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     return analysis.clusterOf.get(`trace:${selection.id}`) ?? null;
   }, [selection, analysis]);
 
-  const layerOrder: CopperLayer[] = layer === "top" ? ["bottom", "top"] : ["top", "bottom"];
+  const layerOrder: CopperLayer[] = [...[...layers].reverse().filter((l) => l !== layer), layer];
+  const cutouts = useMemo(() => new Map(design.zones.map((z) => [z.id, zoneCutouts(design, z, analysis)])), [design, analysis]);
   const placed = design.components.filter((c) => getPart(c.partId)?.footprint);
 
   return (
@@ -298,6 +347,31 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             const dim = l !== layer ? 0.45 : 0.92;
             return (
               <g key={l} opacity={dim}>
+                {show.zones &&
+                  design.zones
+                    .filter((z) => z.layer === l)
+                    .map((z) => {
+                      const sel = selection?.kind === "zone" && selection.id === z.id;
+                      const pts = z.points.map((p) => `${p.x},${p.y}`).join(" ");
+                      return (
+                        <g key={z.id}>
+                          <mask id={`zm-${z.id}`} maskUnits="userSpaceOnUse">
+                            <polygon points={pts} fill="white" />
+                            {cutouts.get(z.id)?.map((c, i) =>
+                              c.kind === "rect" ? (
+                                <rect key={i} x={c.rect.x0} y={c.rect.y0} width={c.rect.x1 - c.rect.x0} height={c.rect.y1 - c.rect.y0} fill="black" />
+                              ) : c.kind === "circle" ? (
+                                <circle key={i} cx={c.c.x} cy={c.c.y} r={c.r} fill="black" />
+                              ) : (
+                                <polyline key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} stroke="black" strokeWidth={c.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                              ),
+                            )}
+                          </mask>
+                          <polygon points={pts} fill={LAYER_COLOR[l]} opacity={0.42} mask={`url(#zm-${z.id})`} />
+                          <polygon points={pts} fill="none" stroke={sel ? "#ffffff" : LAYER_COLOR[l]} strokeWidth={px * (sel ? 2 : 1)} strokeDasharray={`${px * 6} ${px * 4}`} />
+                        </g>
+                      );
+                    })}
                 {design.traces
                   .filter((t) => t.layer === l)
                   .map((t) => {
@@ -348,6 +422,17 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             </g>
           ))}
 
+          {zoneDraft && (
+            <polygon
+              points={[...zoneDraft, cursor].map((p) => `${p.x},${p.y}`).join(" ")}
+              fill={LAYER_COLOR[layer]}
+              fillOpacity={0.2}
+              stroke={LAYER_COLOR[layer]}
+              strokeWidth={px * 1.5}
+              strokeDasharray={`${px * 5} ${px * 4}`}
+              pointerEvents="none"
+            />
+          )}
           {routing && (
             <polyline
               points={[...routing.points, cursor].map((p) => `${p.x},${p.y}`).join(" ")}
@@ -385,10 +470,17 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         <button className={tool === "via" ? "active" : ""} onClick={() => setTool("via")} title="Place via (V)">
           Via
         </button>
-        <span className="sep" />
-        <button onClick={switchLayer} title="Switch active layer (L); while routing this drops a via" style={{ color: LAYER_COLOR[layer] }}>
-          {layer === "top" ? "Top" : "Bottom"} layer
+        <button className={tool === "zone" ? "active" : ""} onClick={() => setTool("zone")} title="Draw a copper pour outline (P)">
+          Pour
         </button>
+        <span className="sep" />
+        <select value={layer} onChange={(e) => setLayer(e.target.value as CopperLayer)} title="Active layer (L cycles; while routing this drops a via)" style={{ color: LAYER_COLOR[layer] }}>
+          {layers.map((l) => (
+            <option key={l} value={l}>
+              {LAYER_NAME[l]}
+            </option>
+          ))}
+        </select>
         <select value={width} onChange={(e) => setWidth(Number(e.target.value))} title="Trace width (mm)">
           {[0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.8, 1.0].map((w) => (
             <option key={w} value={w}>
@@ -396,6 +488,20 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             </option>
           ))}
         </select>
+        {tool === "zone" && (
+          <>
+            <select value={zoneNet} onChange={(e) => setZoneNet(e.target.value)} title="Net for the copper pour">
+              {(namedNets.includes(zoneNet) ? namedNets : [zoneNet, ...namedNets]).map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            <button onClick={pourBoard} title="Pour this net over the whole board on the active layer">
+              Fill board
+            </button>
+          </>
+        )}
         <span className="sep" />
         <button onClick={doAutoPlace} title="Pack all footprints onto the board">
           Auto-place
@@ -423,8 +529,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         <b className="small">Layers</b>
         {(
           [
-            ["top", "Top copper", LAYER_COLOR.top],
-            ["bottom", "Bottom copper", LAYER_COLOR.bottom],
+            ...layers.map((l) => [l, `${LAYER_NAME[l]} copper`, LAYER_COLOR[l]] as const),
+            ["zones", "Copper pours", "#7c8796"],
             ["silk", "Silkscreen", "#f3f4f6"],
             ["rats", "Ratsnest", "#9ca3af"],
             ["drc", "DRC markers", "#ff3b3b"],
@@ -448,6 +554,10 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             : "Click a pad to start a trace"
           : tool === "via"
             ? "Click to place a via · Esc to stop"
+            : tool === "zone"
+              ? zoneDraft
+                ? "Click to add outline corners · double-click / Enter to close the pour · Esc to finish"
+                : "Click corners of the pour outline, or use Fill board"
             : "Drag parts to move · R rotate · F flip side · X route · L switch layer · Del delete trace/via"}
       </div>
       <div className="coords">

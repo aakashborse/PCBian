@@ -9,7 +9,14 @@ import {
   termKey,
   tracesMap,
   updateComponent,
+  copperLayers,
+  deleteNetClass,
+  deleteZone,
+  setNetClass,
+  zonesMap,
   type BoardSettings,
+  type CopperLayer,
+  type NetClass,
 } from "@pcbian/core";
 import { useEffect, useState } from "react";
 import { useEditor } from "./context";
@@ -79,6 +86,25 @@ export function Inspector() {
         </div>
         {part.kind === "part" && <TextField label="Reference" value={c.ref} onChange={(ref) => updateComponent(doc, c.id, { ref })} />}
         <TextField label={part.kind === "part" ? "Value" : "Net name"} value={c.value} onChange={(value) => updateComponent(doc, c.id, { value })} />
+        <div className="field">
+          <label>Fitted</label>
+          <label className="small row" style={{ gap: 6 }}>
+            <input type="checkbox" checked={!c.dnp} onChange={(e) => updateComponent(doc, c.id, { dnp: !e.target.checked })} />
+            {c.dnp ? "Do not populate" : "Populate"}
+          </label>
+        </div>
+        {design.sheets.length > 1 && (
+          <div className="field">
+            <label>Sheet</label>
+            <select value={c.sheet ?? design.sheets[0].id} onChange={(e) => updateComponent(doc, c.id, { sheet: e.target.value })}>
+              {design.sheets.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         {mode === "schematic" ? (
           <div className="field">
             <label>Rotation</label>
@@ -181,6 +207,37 @@ export function Inspector() {
     );
   }
 
+  if (selection?.kind === "zone") {
+    const z = design.zones.find((x) => x.id === selection.id);
+    if (!z) return <Empty />;
+    const names = nets.filter((n) => n.terminals.length > 1).map((n) => n.name);
+    return (
+      <div className="panel-body">
+        <h4>Copper pour</h4>
+        <div className="field">
+          <label>Net</label>
+          <select value={z.net} onChange={(e) => zonesMap(doc).set(z.id, { ...z, net: e.target.value })}>
+            {(names.includes(z.net) ? names : [z.net, ...names]).map((n) => (
+              <option key={n}>{n}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>Layer</label>
+          <select value={z.layer} onChange={(e) => zonesMap(doc).set(z.id, { ...z, layer: e.target.value as CopperLayer })}>
+            {copperLayers(design.board).map((l) => (
+              <option key={l}>{l}</option>
+            ))}
+          </select>
+        </div>
+        <p className="muted small">Same-net pads inside the outline connect through the pour; other nets get clearance automatically. {z.points.length} outline points.</p>
+        <button className="danger" onClick={() => (deleteZone(doc, z.id), select(null))}>
+          Delete pour
+        </button>
+      </div>
+    );
+  }
+
   if (selection?.kind === "via") {
     return (
       <div className="panel-body">
@@ -205,8 +262,17 @@ function Empty() {
       <h4>Board</h4>
       <NumField label="Width (mm)" value={b.width} onChange={(width) => set({ width })} step={1} min={5} />
       <NumField label="Height (mm)" value={b.height} onChange={(height) => set({ height })} step={1} min={5} />
+      <div className="field">
+        <label>Copper layers</label>
+        <select value={b.layers} onChange={(e) => set({ layers: Number(e.target.value) as 2 | 4 })}>
+          <option value={2}>2 (top, bottom)</option>
+          <option value={4}>4 (top, in1, in2, bottom)</option>
+        </select>
+      </div>
+      <NumField label="Thickness" value={b.thickness} onChange={(thickness) => set({ thickness })} step={0.1} min={0.2} />
       <NumField label="Clearance" value={b.clearance} onChange={(clearance) => set({ clearance })} min={0.05} />
       <NumField label="Trace width" value={b.defaultTraceWidth} onChange={(defaultTraceWidth) => set({ defaultTraceWidth })} min={0.05} />
+      <NetClasses />
       <div className="card" style={{ marginTop: 12 }}>
         <div className="kv">
           <span>Components</span>
@@ -217,11 +283,76 @@ function Empty() {
           <span>{design.traces.length}</span>
           <span>Vias</span>
           <span>{design.vias.length}</span>
-          <span>Layers</span>
-          <span>2 (top, bottom)</span>
+          <span>Pours</span>
+          <span>{design.zones.length}</span>
+          <span>Sheets</span>
+          <span>{design.sheets.length}</span>
         </div>
       </div>
       <p className="muted small">Select a part, wire or trace to edit it. Pick parts from the library on the left, or ask the copilot to design a circuit.</p>
+    </div>
+  );
+}
+
+function NetClasses() {
+  const { design, conn, nets } = useEditor();
+  const [adding, setAdding] = useState(false);
+  const names = nets.filter((n) => n.terminals.length > 1).map((n) => n.name);
+  const save = (nc: NetClass) => setNetClass(conn.doc, nc);
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="row" style={{ marginBottom: 6 }}>
+        <h4 style={{ margin: 0 }}>Net classes</h4>
+        <span className="spacer" />
+        <button className="small" onClick={() => setAdding(true)}>
+          + Class
+        </button>
+      </div>
+      {design.netClasses.length === 0 && !adding && <p className="muted small" style={{ margin: 0 }}>All nets use the board defaults. Add a class for wider power traces or extra clearance.</p>}
+      {design.netClasses.map((nc) => (
+        <div key={nc.name} style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 8 }}>
+          <div className="row">
+            <b className="small">{nc.name}</b>
+            <span className="spacer" />
+            <button className="ghost small danger" onClick={() => deleteNetClass(conn.doc, nc.name)}>
+              Remove
+            </button>
+          </div>
+          <NumField label="Trace (mm)" value={nc.traceWidth} onChange={(traceWidth) => save({ ...nc, traceWidth })} min={0.05} />
+          <NumField label="Clearance" value={nc.clearance} onChange={(clearance) => save({ ...nc, clearance })} min={0.05} />
+          <NumField label="Via Ø / drill" value={nc.viaDiameter} onChange={(viaDiameter) => save({ ...nc, viaDiameter, viaDrill: Math.min(nc.viaDrill, viaDiameter - 0.2) })} min={0.3} />
+          <div className="field">
+            <label>Nets</label>
+            <select
+              multiple
+              value={nc.nets}
+              style={{ height: 70 }}
+              onChange={(e) => save({ ...nc, nets: [...e.target.selectedOptions].map((o) => o.value) })}
+            >
+              {[...new Set([...names, ...nc.nets])].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      ))}
+      {adding && (
+        <form
+          className="row"
+          style={{ marginTop: 8 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            const name = String(new FormData(e.currentTarget).get("name") ?? "").trim();
+            if (name) save({ name, traceWidth: 0.5, clearance: 0.25, viaDiameter: 0.8, viaDrill: 0.4, nets: [] });
+            setAdding(false);
+          }}
+        >
+          <input name="name" placeholder="e.g. Power" autoFocus style={{ flex: 1 }} />
+          <button className="primary small">Add</button>
+        </form>
+      )}
     </div>
   );
 }

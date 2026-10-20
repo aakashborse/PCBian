@@ -6,14 +6,18 @@ It is an original implementation inspired by the *category* of tools like Flux.a
 
 ## Features
 
-- **Schematic editor**: parts library with search, place/move/rotate/duplicate, click-to-wire with orthogonal routing, power symbols and net labels, net highlighting, live netlist.
-- **PCB editor**: footprints generated from the same parts, ratsnest, interactive routing with 45° snapping and layer switching (auto via), vias, top/bottom placement, layer visibility.
-- **Auto-place and auto-route**: shelf-packing placer and a two-layer A* grid router with clearance-aware obstacle maps and vias.
-- **Checks**: ERC (unconnected pins, single-pin nets, duplicate references) and DRC (shorts, clearance, unrouted nets, board outline, courtyard overlap, trace width), clickable to jump to the problem.
-- **AI copilot**: chat with Claude, which uses tools to search parts, add components, wire pins, attach power nets, place/route the board and run checks. Its edits land in the shared document, so every collaborator watches it work, and the conversation itself is shared.
-- **Real-time collaboration**: Yjs CRDT document synced over WebSockets; live cursors, presence avatars, remote selection outlines; per-user undo/redo.
-- **Exports**: Gerber RS-274X (copper, mask, silkscreen, outline) + Excellon drill as a fabrication ZIP, BOM CSV, pick-and-place CSV, netlist, project JSON.
-- **Starter templates**: blank board, 555 LED blinker, USB-C 3.3 V supply.
+The full KiCad/Altium comparison, with status and roadmap, is in [docs/FEATURES.md](docs/FEATURES.md).
+
+- **Schematic**: parts library with search, multi-sheet schematics (nets join across sheets by name), click-to-wire, power symbols and net labels, no-connect flags, annotation, DNP flags, net highlighting.
+- **Parts**: parametric footprints (chip, SOIC, DIP, QFP, SOT, headers…), a pin-list part builder, and KiCad `.kicad_sym` + `.kicad_mod` import.
+- **PCB**: 2- or 4-layer boards, interactive routing with 45° snapping and layer switching (automatic vias), copper pours with automatic clearance, net classes (width, clearance, via size), footprints on either side.
+- **Auto-place and auto-route**: a multi-layer A* router on a clearance distance field. It handles net classes, adapts its grid to fine-pitch parts and narrows wide traces at small pads.
+- **Checks**: ERC (unconnected pins, single-pin nets, no-connect misuse, duplicate refs) and DRC (shorts, net-class clearance, unrouted nets, outline, courtyards, layers, via drill/annular ring, trace widths).
+- **Simulation**: DC operating point (resistors, LEDs, diodes, fuses, inductors, LDO regulators; supplies from rail names), with LED-current, resistor-power and fuse warnings.
+- **3D viewer**: three.js board with copper, pours, vias, holes and package-shaped component bodies.
+- **Manufacturing and interop**: Gerber RS-274X for every copper layer (pours as regions), mask, paste and silkscreen with reference text, Excellon drill, BOM, pick-and-place, fab notes, KiCad `.kicad_pcb` and KiCad netlist export.
+- **Autonomous AI copilot**: Claude can do everything in the editor through about 30 tools. Given a spec, it plans, creates missing parts, draws the schematic across sheets, simulates, sets up layers and net classes, places, pours, routes and repeats until ERC/DRC are clean, then runs a fabrication-readiness check. Everyone sees it work live, and it can be stopped at any time.
+- **Real-time collaboration**: Yjs CRDT over WebSockets, live cursors, presence, per-user undo/redo.
 
 ## Quick start
 
@@ -45,7 +49,11 @@ Everything except the copilot works without an API key. Projects are stored unde
 
 **Schematic**: pick a part in the left library and click to place it (Shift+click places several). Click a pin to start a wire, click empty space to add corners, click another pin to finish. Drag the background to pan, scroll to zoom.
 
-**PCB**: footprints start to the left of the board; drag them on or press **Auto-place**. Press **X** (Route), click a pad, click to add corners, click the destination pad. **L** switches layer (dropping a via mid-route). **Auto-route** routes everything left in the ratsnest.
+**Schematic sheets** are tabs along the bottom (+ adds, double-click renames). **No-connect** (Q) toggles flags on pins; **Annotate** renumbers references.
+
+**PCB**: footprints start to the left of the board; drag them on or press **Auto-place**. Press **X** (Route), click a pad, click to add corners, click the destination pad. **L** cycles the active layer (dropping a via mid-route). **P** (Pour) draws a copper-pour outline, or use **Fill board**. Layer count, thickness and net classes are in the Inspector when nothing is selected. **Auto-route** routes everything left in the ratsnest.
+
+**3D** shows the assembled board; the **Sim** tab shows the DC operating point live.
 
 | Key | Schematic | PCB |
 | --- | --- | --- |
@@ -53,8 +61,9 @@ Everything except the copilot works without an API key. Projects are stored unde
 | `F` | Zoom to fit | Flip footprint side (or fit when nothing is selected) |
 | `Del` / `Backspace` | Delete part or wire | Delete trace or via |
 | `Ctrl+D` | Duplicate part | |
-| `X` / `V` / `S` | | Route / via / select tool |
-| `L` | | Switch active layer |
+| `X` / `V` / `S` / `P` | | Route / via / select / pour tool |
+| `Q` | Toggle no-connect tool | |
+| `L` | | Cycle active layer |
 | `Esc` | Cancel wire / placement | Finish route / back to select |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | Undo / redo your own edits | same |
 
@@ -81,10 +90,10 @@ The copilot (`apps/server/src/copilot.ts`) runs a streaming manual tool loop aga
 ## Development
 
 ```bash
-npm test          # vitest: netlist, auto-place/route + DRC, shorts, exports, pin resolution
+npm test          # vitest: netlist, routing (2/4 layers, net classes), pours, DRC/ERC, simulation, KiCad I/O, part builder
 npm run typecheck
 ```
 
 ## Current limitations
 
-Compared with a mature commercial tool, this first version has a small built-in parts library (about 30 parts, no external part search), two copper layers, no copper pours/zones, no 3D viewer, no user accounts or permissions (anyone with a project link can edit it), and a grid router that is good for simple boards but not dense ones.
+See [docs/FEATURES.md](docs/FEATURES.md) for the full list and roadmap. The main gaps compared with KiCad/Altium: no hierarchical sheet symbols or buses yet, no graphical symbol/footprint editors (parts come from the builder or KiCad import), at most 4 copper layers, no differential pairs, length tuning or push-and-shove, DC-only simulation, block-shaped 3D models with no STEP export, no KiCad board/schematic import, and no accounts (anyone with a project link can edit it).

@@ -8,3 +8,6 @@ export * from "./export";
 export * from "./router";
 export * from "./describe";
 export * from "./edit";
+export * from "./sim";
+export * from "./font";
+export * from "./kicad";

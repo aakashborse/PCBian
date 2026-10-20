@@ -5,6 +5,7 @@ import { navigate } from "../lib/router";
 import { useDesign, useProjectConnection } from "../lib/useProject";
 import { useUser } from "../lib/user";
 import { initials, UserBadge } from "../pages/UserBadge";
+import { Board3D } from "./Board3D";
 import { Checks } from "./Checks";
 import { EditorContext, type EditorState, type FocusRequest, type Selection, type ViewMode } from "./context";
 import { Copilot } from "./Copilot";
@@ -14,8 +15,9 @@ import { Library } from "./Library";
 import { PcbCanvas } from "./PcbCanvas";
 import { usePresence } from "./presence";
 import { SchematicCanvas } from "./SchematicCanvas";
+import { Simulation } from "./Simulation";
 
-type RightTab = "copilot" | "inspect" | "checks";
+type RightTab = "copilot" | "inspect" | "checks" | "sim";
 
 export function Editor({ projectId }: { projectId: string }) {
   const { conn, synced, online } = useProjectConnection(projectId);
@@ -62,7 +64,8 @@ export function Editor({ projectId }: { projectId: string }) {
       (selection.kind === "component" && design.components.some((c) => c.id === selection.id)) ||
       (selection.kind === "wire" && design.wires.some((w) => w.id === selection.id)) ||
       (selection.kind === "trace" && design.traces.some((t) => t.id === selection.id)) ||
-      (selection.kind === "via" && design.vias.some((v) => v.id === selection.id));
+      (selection.kind === "via" && design.vias.some((v) => v.id === selection.id)) ||
+      (selection.kind === "zone" && design.zones.some((z) => z.id === selection.id));
     if (!exists) select(null);
   }, [design, selection, select]);
 
@@ -132,6 +135,9 @@ export function Editor({ projectId }: { projectId: string }) {
             <button className={mode === "pcb" ? "on" : ""} onClick={() => state.setMode("pcb")}>
               PCB
             </button>
+            <button className={mode === "3d" ? "on" : ""} onClick={() => state.setMode("3d")}>
+              3D
+            </button>
           </div>
           <button className="ghost" onClick={() => conn.undo.undo()} title="Undo (Ctrl+Z)">
             ↶
@@ -170,6 +176,8 @@ export function Editor({ projectId }: { projectId: string }) {
                     ["Gerber + drill (fabrication .zip)", () => exporters.gerbers(design)],
                     ["Bill of materials (.csv)", () => exporters.bom(design)],
                     ["Pick and place (.csv)", () => exporters.pnp(design)],
+                    ["KiCad board (.kicad_pcb)", () => exporters.kicadPcb(design)],
+                    ["KiCad netlist (.net)", () => exporters.kicadNet(design)],
                     ["Netlist (.txt)", () => exporters.netlist(design)],
                     ["Project data (.json)", () => exporters.json(design)],
                   ] as const
@@ -193,7 +201,9 @@ export function Editor({ projectId }: { projectId: string }) {
           <Library />
         </aside>
 
-        <main className="main">{mode === "schematic" ? <SchematicCanvas presence={presence} /> : <PcbCanvas presence={presence} />}</main>
+        <main className="main">
+          {mode === "schematic" ? <SchematicCanvas presence={presence} /> : mode === "pcb" ? <PcbCanvas presence={presence} /> : <Board3D />}
+        </main>
 
         <aside className="right">
           <div className="panel-tabs">
@@ -206,10 +216,14 @@ export function Editor({ projectId }: { projectId: string }) {
             <button className={tab === "checks" ? "on" : ""} onClick={() => setTab("checks")}>
               Checks
             </button>
+            <button className={tab === "sim" ? "on" : ""} onClick={() => setTab("sim")}>
+              Sim
+            </button>
           </div>
           {tab === "copilot" && <Copilot enabled={copilot} />}
           {tab === "inspect" && <Inspector />}
           {tab === "checks" && <Checks />}
+          {tab === "sim" && <Simulation />}
         </aside>
       </div>
       {toastMsg && <div className="toast">{toastMsg}</div>}

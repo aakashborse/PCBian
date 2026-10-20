@@ -2,8 +2,8 @@ import type { ChatEntryView, Design, Net, Vec } from "@pcbian/core";
 import { createContext, useContext } from "react";
 import type { ProjectConnection } from "../lib/useProject";
 
-export type Selection = { kind: "component" | "wire" | "trace" | "via"; id: string } | null;
-export type ViewMode = "schematic" | "pcb";
+export type Selection = { kind: "component" | "wire" | "trace" | "via" | "zone"; id: string } | null;
+export type ViewMode = "schematic" | "pcb" | "3d";
 
 export interface FocusRequest {
   view: ViewMode;

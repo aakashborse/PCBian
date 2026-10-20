@@ -264,19 +264,97 @@ export const PARTS: PartDef[] = [
 ];
 
 const BY_ID = new Map(PARTS.map((p) => [p.id, p]));
+/** Project-specific parts (created by users/the copilot or imported from KiCad), keyed by globally unique id. */
+const CUSTOM = new Map<string, PartDef>();
 
-export function getPart(id: string): PartDef | undefined {
-  return BY_ID.get(id);
+export function registerParts(parts: Iterable<PartDef>) {
+  for (const p of parts) CUSTOM.set(p.id, p);
 }
 
-export function searchParts(query: string, limit = 10): PartDef[] {
+export function getPart(id: string): PartDef | undefined {
+  return BY_ID.get(id) ?? CUSTOM.get(id);
+}
+
+export function searchParts(query: string, limit = 10, extra: PartDef[] = []): PartDef[] {
+  const pool = [...PARTS, ...extra];
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (terms.length === 0) return PARTS.slice(0, limit);
-  const scored = PARTS.map((p) => {
+  if (terms.length === 0) return pool.slice(0, limit);
+  const scored = pool.map((p) => {
     const hay = [p.id, p.name, p.category, p.description, p.defaultValue, p.mpn ?? "", ...(p.keywords ?? [])].join(" ").toLowerCase();
     const score = terms.reduce((s, t) => s + (hay.includes(t) ? 1 + ((p.keywords ?? []).includes(t) ? 1 : 0) : 0), 0);
     return { p, score };
   }).filter((x) => x.score > 0);
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, limit).map((x) => x.p);
+}
+
+// ---------- part builder ----------
+
+export type PackageSpec =
+  | { type: "dip" | "soic"; pins: number }
+  | { type: "qfp"; pins: number; pitch?: number; span?: number }
+  | { type: "header"; pins: number }
+  | { type: "chip"; size: "0402" | "0603" | "0805" | "1206" }
+  | { type: "sot23" | "sot223" | "sod123" }
+  | { type: "tht2"; pitch?: number };
+
+export interface PartSpec {
+  name: string;
+  refPrefix: string;
+  value?: string;
+  description?: string;
+  category?: string;
+  mpn?: string;
+  keywords?: string[];
+  /** Pins as [number, name]; `side` defaults to left for the first half, right for the rest. */
+  pins: { number: string; name: string; side?: "left" | "right" }[];
+  package: PackageSpec;
+}
+
+export function packageFootprint(pkg: PackageSpec): Footprint {
+  switch (pkg.type) {
+    case "dip":
+      return fp.dip(pkg.pins);
+    case "soic":
+      return fp.soic(pkg.pins);
+    case "qfp":
+      return fp.qfp(pkg.pins, pkg.pitch ?? 0.5, pkg.span ?? Math.max(5, (pkg.pins / 4) * (pkg.pitch ?? 0.5) + 2.5));
+    case "header":
+      return fp.header(pkg.pins);
+    case "chip":
+      return fp.chip(pkg.size);
+    case "sot23":
+      return fp.sot23();
+    case "sot223":
+      return fp.sot223();
+    case "sod123":
+      return fp.sod123();
+    case "tht2":
+      return fp.tht2("THT_2pin", pkg.pitch ?? 5.08, (pkg.pitch ?? 5.08) + 1, 2.5);
+  }
+}
+
+/** Build a complete part (IC-style symbol + footprint) from a compact spec. */
+export function buildPart(spec: PartSpec, id = `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`): PartDef {
+  const footprint = packageFootprint(spec.package);
+  const padIds = new Set(footprint.pads.map((p) => p.id));
+  for (const pin of spec.pins) if (!padIds.has(pin.number)) throw new Error(`Pin ${pin.number} has no pad in a ${spec.package.type} package (pads: ${[...padIds].join(", ")})`);
+  for (const pad of padIds) if (!spec.pins.some((p) => p.number === pad)) throw new Error(`Pad ${pad} of the ${spec.package.type} package has no pin; list every pad (use NC for unused)`);
+  const half = Math.ceil(spec.pins.length / 2);
+  const left: [string, string][] = [];
+  const right: [string, string][] = [];
+  spec.pins.forEach((p, i) => ((p.side ?? (i < half ? "left" : "right")) === "left" ? left : right).push([p.number, p.name]));
+  return {
+    id,
+    name: spec.name,
+    category: spec.category ?? "Custom",
+    description: spec.description ?? spec.name,
+    kind: "part",
+    refPrefix: spec.refPrefix,
+    defaultValue: spec.value ?? spec.name,
+    mpn: spec.mpn,
+    keywords: spec.keywords ?? [],
+    symbol: icSymbol(left, right, spec.pins.length > 3 ? spec.name.slice(0, 14) : ""),
+    footprint,
+  };
 }

@@ -9,7 +9,9 @@ export interface Vec {
 
 export type Rotation = 0 | 90 | 180 | 270;
 export type Side = "top" | "bottom";
-export type CopperLayer = "top" | "bottom";
+/** Copper layers from front to back. Inner layers exist only on 4-layer boards. */
+export type CopperLayer = "top" | "in1" | "in2" | "bottom";
+export const ALL_COPPER: CopperLayer[] = ["top", "in1", "in2", "bottom"];
 
 /** Drawing primitives used by schematic symbols and footprint silkscreen. */
 export type Shape =
@@ -98,6 +100,37 @@ export interface ComponentData {
   value: string;
   sch: Placement;
   pcb: PcbPlacement;
+  /** Schematic sheet id; missing means the first sheet. */
+  sheet?: string;
+  /** Pin ids deliberately left unconnected (no-connect flags). */
+  noConnect?: string[];
+  /** Excluded from BOM / placement (e.g. fiducials, do-not-populate). */
+  dnp?: boolean;
+}
+
+export interface Sheet {
+  id: string;
+  name: string;
+}
+
+export interface Zone {
+  id: string;
+  net: string;
+  layer: CopperLayer;
+  /** Closed outline polygon in PCB mm. */
+  points: Vec[];
+  /** Higher priority zones win where zones overlap (reserved for future use). */
+  priority?: number;
+}
+
+export interface NetClass {
+  name: string;
+  traceWidth: number;
+  clearance: number;
+  viaDiameter: number;
+  viaDrill: number;
+  /** Net names assigned to this class. */
+  nets: string[];
 }
 
 export interface Terminal {
@@ -131,6 +164,10 @@ export interface Via {
 export interface BoardSettings {
   width: number;
   height: number;
+  /** Copper layer count: 2 (top/bottom) or 4 (top/in1/in2/bottom). */
+  layers: 2 | 4;
+  /** Board thickness in mm (for 3D and fab notes). */
+  thickness: number;
   /** Minimum copper-to-copper clearance used by DRC (mm). */
   clearance: number;
   defaultTraceWidth: number;
@@ -144,6 +181,9 @@ export interface Design {
   wires: Wire[];
   traces: Trace[];
   vias: Via[];
+  zones: Zone[];
+  sheets: Sheet[];
+  netClasses: NetClass[];
 }
 
 export interface Net {

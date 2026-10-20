@@ -1,6 +1,12 @@
 import {
   addComponent,
+  addSheet,
   addWire,
+  annotate,
+  deleteSheet,
+  renameSheet,
+  sheetOf,
+  toggleNoConnect,
   deleteComponent,
   deleteWire,
   getPart,
@@ -74,6 +80,22 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   const vp = useViewport({ x: 300, y: 250, k: 1.6 }, 0.2, 8);
   const [cursor, setCursor] = useState<Vec>({ x: 0, y: 0 });
   const [wiring, setWiring] = useState<Wiring | null>(null);
+  const [ncTool, setNcTool] = useState(false);
+  const [sheet, setSheet] = useState(design.sheets[0].id);
+  const sheetIds = design.sheets.map((s) => s.id);
+  useEffect(() => {
+    if (!sheetIds.includes(sheet)) setSheet(sheetIds[0]);
+  }, [sheetIds.join(","), sheet]);
+  // Follow the selection to its sheet (e.g. when picked from the Checks panel).
+  useEffect(() => {
+    if (selection?.kind !== "component") return;
+    const c = design.components.find((x) => x.id === selection.id);
+    if (c && sheetOf(design, c) !== sheet) setSheet(sheetOf(design, c));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection]);
+  const onSheet = useMemo(() => design.components.filter((c) => sheetOf(design, c) === sheet), [design, sheet]);
+  const onSheetIds = useMemo(() => new Set(onSheet.map((c) => c.id)), [onSheet]);
+  const sheetWires = useMemo(() => design.wires.filter((w) => onSheetIds.has(w.a.comp)), [design.wires, onSheetIds]);
   const drag = useRef<{ id: string; start: Vec; orig: Vec; moved: boolean } | null>(null);
   const fitted = useRef(false);
 
@@ -102,7 +124,8 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
 
   function fitAll() {
     if (!design.components.length) return vp.setView({ x: 300, y: 250, k: 1.6 });
-    const bs = design.components.map((c) => {
+    if (!onSheet.length) return vp.setView({ x: 300, y: 250, k: 1.6 });
+    const bs = onSheet.map((c) => {
       const b = symbolBounds(c);
       return { x0: b.x0 + c.sch.x, y0: b.y0 + c.sch.y, x1: b.x1 + c.sch.x, y1: b.y1 + c.sch.y };
     });
@@ -131,7 +154,9 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("input, textarea, select")) return;
+      if (e.key.toLowerCase() === "q" && !e.metaKey && !e.ctrlKey) setNcTool((v) => !v);
       if (e.key === "Escape") {
+        setNcTool(false);
         setWiring(null);
         setPlacing(null);
         select(null);
@@ -179,7 +204,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
     if (e.button !== 0) return;
     const p = toGrid(vp.toWorld(e.clientX, e.clientY));
     if (placing) {
-      const c = addComponent(doc, placing, p);
+      const c = addComponent(doc, placing, p, { sheet: sheet === design.sheets[0].id ? undefined : sheet });
       select({ kind: "component", id: c.id });
       if (!e.shiftKey) setPlacing(null);
     } else if (wiring) {
@@ -193,6 +218,10 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   const onPinDown = (e: React.PointerEvent, t: Terminal) => {
     if (e.button !== 0 || placing) return;
     e.stopPropagation();
+    if (ncTool) {
+      toggleNoConnect(doc, t.comp, t.pin);
+      return;
+    }
     if (!wiring) {
       setWiring({ from: t, points: [] });
       return;
@@ -242,7 +271,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         </defs>
         <rect width="100%" height="100%" fill="url(#sch-grid)" />
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
-          {design.wires.map((w) => {
+          {sheetWires.map((w) => {
             const pts = wirePath(byId, w);
             if (!pts) return null;
             const sel = selection?.kind === "wire" && selection.id === w.id;
@@ -264,7 +293,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
             );
           })}
 
-          {design.components.map((c) => {
+          {onSheet.map((c) => {
             const part = getPart(c.partId);
             if (!part) return null;
             const sel = selection?.kind === "component" && selection.id === c.id;
@@ -303,8 +332,11 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
                     <g key={p.id} onPointerDown={(e) => onPinDown(e, t)} style={{ cursor: "crosshair" }}>
                       <circle cx={p.world.x} cy={p.world.y} r={4} fill="transparent" />
                       {n >= 2 && <circle cx={p.world.x} cy={p.world.y} r={2.2} fill={COLORS.wire} />}
-                      {part.kind === "part" && n === 0 && <rect x={p.world.x - 1.5} y={p.world.y - 1.5} width={3} height={3} fill="none" stroke="#9ca3af" strokeWidth={0.6} />}
+                      {part.kind === "part" && n === 0 && !c.noConnect?.includes(p.id) && <rect x={p.world.x - 1.5} y={p.world.y - 1.5} width={3} height={3} fill="none" stroke="#9ca3af" strokeWidth={0.6} />}
                       {active && <circle cx={p.world.x} cy={p.world.y} r={3.5} fill="none" stroke={COLORS.sel} strokeWidth={1.2} />}
+                      {c.noConnect?.includes(p.id) && (
+                        <path d={`M${p.world.x - 4} ${p.world.y - 4} L${p.world.x + 4} ${p.world.y + 4} M${p.world.x + 4} ${p.world.y - 4} L${p.world.x - 4} ${p.world.y + 4}`} stroke="#2563eb" strokeWidth={1.4} />
+                      )}
                     </g>
                   );
                 })}
@@ -343,7 +375,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         </g>
       </svg>
       <div className="toolbar">
-        <button className={!wiring && !placing ? "active" : ""} onClick={() => (setWiring(null), setPlacing(null))} title="Select / move (Esc)">
+        <button className={!wiring && !placing && !ncTool ? "active" : ""} onClick={() => (setWiring(null), setPlacing(null), setNcTool(false))} title="Select / move (Esc)">
           Select
         </button>
         <button onClick={() => setPlacing("power_gnd")} className={placing === "power_gnd" ? "active" : ""} title="Place ground symbol">
@@ -352,8 +384,21 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         <button onClick={() => setPlacing("power_rail")} className={placing === "power_rail" ? "active" : ""} title="Place power rail symbol">
           Power
         </button>
-        <button onClick={() => setPlacing("net_label")} className={placing === "net_label" ? "active" : ""} title="Place net label">
+        <button onClick={() => setPlacing("net_label")} className={placing === "net_label" ? "active" : ""} title="Place net label (connects across sheets)">
           Label
+        </button>
+        <button onClick={() => (setNcTool(!ncTool), setPlacing(null), setWiring(null))} className={ncTool ? "active" : ""} title="Toggle no-connect flags on pins (Q)">
+          No-connect
+        </button>
+        <button
+          onClick={() => {
+            undo.stopCapturing();
+            const r = annotate(doc);
+            ed.toast(r.size ? `Re-annotated ${r.size} reference${r.size === 1 ? "" : "s"}` : "References are already in order");
+          }}
+          title="Renumber reference designators"
+        >
+          Annotate
         </button>
         <span className="sep" />
         <button disabled={selection?.kind !== "component"} onClick={() => {
@@ -374,14 +419,17 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
           Fit
         </button>
       </div>
-      <div className="hint">
-        {placing
+      <SheetTabs sheet={sheet} setSheet={setSheet} />
+      <div className="hint" style={{ bottom: 44 }}>
+        {ncTool
+          ? "Click pins to toggle no-connect flags · Esc to stop"
+          : placing
           ? "Click to place · Shift+click to keep placing · Esc to stop"
           : wiring
             ? "Click empty space to add a corner · click a pin to finish · Esc / right-click to cancel"
             : "Click a pin to start a wire · drag parts to move · R rotate · Del delete · scroll to zoom · drag background to pan"}
       </div>
-      <div className="coords">
+      <div className="coords" style={{ bottom: 44 }}>
         {gp.x}, {gp.y}
       </div>
     </>
@@ -401,4 +449,54 @@ function simplify(pts: Vec[]): Vec[] {
     out.push(p);
   }
   return out;
+}
+
+function SheetTabs({ sheet, setSheet }: { sheet: string; setSheet: (id: string) => void }) {
+  const { design, conn, toast } = useEditor();
+  return (
+    <div className="sheet-tabs">
+      {design.sheets.map((s) => (
+        <button
+          key={s.id}
+          className={s.id === sheet ? "on" : ""}
+          onClick={() => setSheet(s.id)}
+          onDoubleClick={() => {
+            const name = prompt("Rename sheet", s.name);
+            if (name?.trim()) renameSheet(conn.doc, s.id, name.trim());
+          }}
+          title="Double-click to rename"
+        >
+          {s.name}
+          <span className="muted small"> {design.components.filter((c) => sheetOf(design, c) === s.id && getPart(c.partId)?.kind === "part").length}</span>
+          {design.sheets.length > 1 && s.id === sheet && (
+            <span
+              className="x"
+              title="Delete sheet"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (confirm(`Delete sheet "${s.name}" and everything on it?`)) {
+                  try {
+                    deleteSheet(conn.doc, s.id);
+                  } catch (err) {
+                    toast((err as Error).message);
+                  }
+                }
+              }}
+            >
+              ×
+            </span>
+          )}
+        </button>
+      ))}
+      <button
+        title="Add a schematic sheet"
+        onClick={() => {
+          const s = addSheet(conn.doc, `Sheet ${design.sheets.length + 1}`);
+          setSheet(s.id);
+        }}
+      >
+        +
+      </button>
+    </div>
+  );
 }

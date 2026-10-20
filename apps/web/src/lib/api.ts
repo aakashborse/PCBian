@@ -33,5 +33,6 @@ export const api = {
   rename: (id: string, name: string) => call<ProjectMeta>("PATCH", `/api/projects/${id}`, { name }),
   remove: (id: string) => call<void>("DELETE", `/api/projects/${id}`),
   ask: (id: string, message: string, author: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot`, { message, author }),
+  stopCopilot: (id: string) => call<{ stopped: boolean }>("POST", `/api/projects/${id}/copilot/stop`),
   resetCopilot: (id: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot/reset`),
 };

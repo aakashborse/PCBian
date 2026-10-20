@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { setName } from "@pcbian/core";
 import express from "express";
 import { WebSocketServer } from "ws";
-import { copilotEnabled, isBusy, resetCopilot, runCopilot } from "./copilot.js";
+import { copilotEnabled, isBusy, resetCopilot, runCopilot, stopCopilot } from "./copilot.js";
 import { dropRoom, getRoom, roomIdFromRequest, saveAll } from "./rooms.js";
 import { createProjectMeta, deleteProjectMeta, getProject, listProjects, updateProjectMeta } from "./store.js";
 import { buildTemplate, TEMPLATES, type TemplateId } from "./templates.js";
@@ -71,6 +71,10 @@ app.post("/api/projects/:id/copilot", (req, res) => {
   // The reply streams into the shared Yjs chat log; the HTTP call returns immediately.
   void runCopilot(getRoom(p.id), message, author);
   res.status(202).json({ ok: true });
+});
+
+app.post("/api/projects/:id/copilot/stop", (req, res) => {
+  res.json({ stopped: stopCopilot(req.params.id) });
 });
 
 app.post("/api/projects/:id/copilot/reset", (req, res) => {

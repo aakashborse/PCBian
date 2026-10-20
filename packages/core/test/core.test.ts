@@ -74,7 +74,7 @@ describe("pcb", () => {
     expect(ratsnest(design)).toEqual([]);
     expect(runDrc(design).filter((i) => i.severity === "error")).toEqual([]);
     const files = gerberFiles(design);
-    expect(Object.keys(files).length).toBe(8);
+    expect(Object.keys(files).length).toBe(11);
     expect(files["blinky-F_Cu.gtl"]).toContain("D03*");
     expect(bomCsv(design)).toContain('"R1","1","330"');
   });

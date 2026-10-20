@@ -1,14 +1,17 @@
 // Manufacturing outputs: BOM, netlist, Gerber RS-274X and Excellon drill files.
-import { padsOf, toWorld } from "./geometry";
+import { courtyardRect, padsOf, toWorld } from "./geometry";
 import { getPart } from "./library";
 import { computeNets } from "./netlist";
-import type { ComponentData, Design, Shape, Side, Vec } from "./types";
+import { analyzeCopper, zoneCutouts } from "./copper";
+import { copperLayers } from "./doc";
+import { strokeText } from "./font";
+import type { ComponentData, CopperLayer, Design, Shape, Side, Vec } from "./types";
 
 export function bomCsv(design: Design): string {
   const groups = new Map<string, { refs: string[]; value: string; part: string; footprint: string; mpn: string }>();
   for (const c of design.components) {
     const part = getPart(c.partId);
-    if (!part || part.kind !== "part") continue;
+    if (!part || part.kind !== "part" || c.dnp) continue;
     const key = `${c.partId}|${c.value}`;
     if (!groups.has(key)) groups.set(key, { refs: [], value: c.value, part: part.name, footprint: part.footprint?.name ?? "", mpn: part.mpn ?? "" });
     groups.get(key)!.refs.push(c.ref);
@@ -67,6 +70,18 @@ class Gerber {
     this.body.push(`${this.xy(at)}D03*`);
   }
 
+  /** Switch between dark (adds copper) and clear (removes copper) polarity. */
+  polarity(dark: boolean) {
+    this.body.push(dark ? "%LPD*%" : "%LPC*%");
+  }
+
+  region(pts: Vec[]) {
+    if (pts.length < 3) return;
+    this.body.push("G36*", `${this.xy(pts[0])}D02*`);
+    for (const p of [...pts.slice(1), pts[0]]) this.body.push(`${this.xy(p)}D01*`);
+    this.body.push("G37*");
+  }
+
   polyline(width: number, pts: Vec[]) {
     if (pts.length < 2) return;
     this.select(`C,${width.toFixed(4)}`);
@@ -102,30 +117,68 @@ function silkPolylines(shape: Shape, comp: ComponentData): Vec[][] {
   }
 }
 
+const LAYER_FILE: Record<CopperLayer, { tag: string; ext: string }> = {
+  top: { tag: "F_Cu", ext: "gtl" },
+  in1: { tag: "In1_Cu", ext: "g2" },
+  in2: { tag: "In2_Cu", ext: "g3" },
+  bottom: { tag: "B_Cu", ext: "gbl" },
+};
+
 export function gerberFiles(design: Design): Record<string, string> {
   const H = design.board.height;
   const files: Record<string, string> = {};
-  const parts = design.components.filter((c) => getPart(c.partId)?.footprint);
+  const parts = design.components.filter((c) => getPart(c.partId)?.footprint && !c.dnp);
+  const allParts = design.components.filter((c) => getPart(c.partId)?.footprint);
+  const layers = copperLayers(design.board);
+  const analysis = design.zones.length ? analyzeCopper(design) : null;
+
+  layers.forEach((layer, i) => {
+    const pos = i === 0 ? "Top" : i === layers.length - 1 ? "Bot" : "Inr";
+    const cu = new Gerber(`Copper,L${i + 1},${pos}`, H);
+    // Pours first: dark region, then clear-polarity cut-outs around other-net copper.
+    for (const z of design.zones.filter((z) => z.layer === layer)) {
+      cu.polarity(true);
+      cu.region(z.points);
+      cu.polarity(false);
+      for (const c of zoneCutouts(design, z, analysis!)) {
+        if (c.kind === "rect") cu.flash("R", c.rect.x1 - c.rect.x0, c.rect.y1 - c.rect.y0, { x: (c.rect.x0 + c.rect.x1) / 2, y: (c.rect.y0 + c.rect.y1) / 2 });
+        else if (c.kind === "circle") cu.flash("C", c.r * 2, c.r * 2, c.c);
+        else cu.polyline(c.width, c.points);
+      }
+      cu.polarity(true);
+    }
+    for (const c of allParts) {
+      for (const p of padsOf(c)) {
+        if (!p.layers.includes(layer)) continue;
+        cu.flash(p.shape === "circle" ? "C" : p.shape === "oval" ? "O" : "R", p.ww, p.wh, p.world);
+      }
+    }
+    for (const t of design.traces) if (t.layer === layer) cu.polyline(t.width, t.points);
+    for (const v of design.vias) cu.flash("C", v.diameter, v.diameter, v);
+    files[`${design.name}-${LAYER_FILE[layer].tag}.${LAYER_FILE[layer].ext}`] = cu.toString();
+  });
 
   for (const side of ["top", "bottom"] as Side[]) {
     const tag = side === "top" ? "F" : "B";
-    const cu = new Gerber(`Copper,L${side === "top" ? 1 : 2},${side === "top" ? "Top" : "Bot"}`, H);
     const mask = new Gerber(`Soldermask,${side === "top" ? "Top" : "Bot"}`, H);
     const silk = new Gerber(`Legend,${side === "top" ? "Top" : "Bot"}`, H);
-    for (const c of parts) {
+    const paste = new Gerber(`Paste,${side === "top" ? "Top" : "Bot"}`, H);
+    for (const c of allParts) {
       for (const p of padsOf(c)) {
         if (!p.layers.includes(side)) continue;
         const shape = p.shape === "circle" ? "C" : p.shape === "oval" ? "O" : "R";
-        cu.flash(shape, p.ww, p.wh, p.world);
         mask.flash(shape, p.ww + 0.1, p.wh + 0.1, p.world);
+        if (!p.drill && parts.includes(c)) paste.flash(shape, p.ww * 0.9, p.wh * 0.9, p.world);
       }
-      if (c.pcb.side === side) for (const s of getPart(c.partId)!.footprint!.silk) for (const pl of silkPolylines(s, c)) silk.polyline(0.15, pl);
+      if (c.pcb.side === side) {
+        for (const s of getPart(c.partId)!.footprint!.silk) for (const pl of silkPolylines(s, c)) silk.polyline(0.15, pl);
+        const r = courtyardRect(c)!;
+        for (const stroke of strokeText(c.ref, { x: c.pcb.x, y: r.y0 - 0.9 }, 0.8, side === "bottom")) silk.polyline(0.12, stroke);
+      }
     }
-    for (const t of design.traces) if (t.layer === side) cu.polyline(t.width, t.points);
-    for (const v of design.vias) cu.flash("C", v.diameter, v.diameter, v);
-    files[`${design.name}-${tag}_Cu.${side === "top" ? "gtl" : "gbl"}`] = cu.toString();
     files[`${design.name}-${tag}_Mask.${side === "top" ? "gts" : "gbs"}`] = mask.toString();
     files[`${design.name}-${tag}_Silkscreen.${side === "top" ? "gto" : "gbo"}`] = silk.toString();
+    files[`${design.name}-${tag}_Paste.${side === "top" ? "gtp" : "gbp"}`] = paste.toString();
   }
 
   const edge = new Gerber("Profile,NP", H);
@@ -133,7 +186,24 @@ export function gerberFiles(design: Design): Record<string, string> {
   edge.polyline(0.1, [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }, { x: 0, y: 0 }]);
   files[`${design.name}-Edge_Cuts.gm1`] = edge.toString();
   files[`${design.name}.drl`] = excellon(design);
+  files[`${design.name}-fab-notes.txt`] = fabNotes(design);
   return files;
+}
+
+export function fabNotes(design: Design): string {
+  const b = design.board;
+  const holes = new Set<string>();
+  for (const c of design.components) for (const p of padsOf(c)) if (p.drill) holes.add(p.drill.toFixed(2));
+  for (const v of design.vias) holes.add(v.drill.toFixed(2));
+  return [
+    `PCBian fabrication notes: ${design.name}`,
+    `Board size: ${b.width} x ${b.height} mm, ${b.layers} copper layers, ${b.thickness} mm FR-4`,
+    `Minimum trace/space: ${Math.min(b.defaultTraceWidth, ...design.netClasses.map((c) => c.traceWidth))} / ${Math.min(b.clearance, ...design.netClasses.map((c) => c.clearance))} mm`,
+    `Drill sizes: ${[...holes].sort().join(", ") || "none"} mm`,
+    `Finish: HASL lead-free (default), green soldermask, white silkscreen, 1 oz copper`,
+    `Layer stack: ${copperLayers(b).join(" / ")}`,
+    "",
+  ].join("\n");
 }
 
 export function excellon(design: Design): string {

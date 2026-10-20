@@ -1,7 +1,8 @@
-// Auto-placement and a two-layer grid-based A* auto-router.
+// Auto-placement and a multi-layer, net-class-aware grid A* auto-router.
 import { analyzeCopper, ratsnest } from "./copper";
 import { courtyardRect, padRect, pointSegmentDistance, segmentRectDistance, type WorldPad } from "./geometry";
 import { getPart } from "./library";
+import { copperLayers, netRules } from "./doc";
 import type { CopperLayer, Design, PcbPlacement, Trace, Vec } from "./types";
 
 // ---------- auto-placement ----------
@@ -66,18 +67,17 @@ export interface RouteOptions {
   allowVias?: boolean;
   viaDiameter?: number;
   viaDrill?: number;
+  /** Only route these nets (default: all). */
+  nets?: string[];
 }
 
 export interface RouteResult {
   traces: Omit<Trace, "id">[];
-  vias: Vec[];
+  vias: (Vec & { diameter: number; drill: number })[];
   routed: number;
   failed: { net: string; a: Vec; b: Vec }[];
 }
 
-const FREE = -1;
-const BLOCKED = -2;
-const LAYERS: CopperLayer[] = ["top", "bottom"];
 
 class MinHeap {
   private ids: number[] = [];
@@ -126,81 +126,95 @@ class MinHeap {
 }
 
 export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult {
-  const width = opts.width ?? design.board.defaultTraceWidth;
-  const clearance = opts.clearance ?? design.board.clearance;
-  const res = opts.grid ?? 0.25;
-  const viaD = opts.viaDiameter ?? 0.6;
+  const baseWidth = opts.width ?? design.board.defaultTraceWidth;
   const allowVias = opts.allowVias ?? true;
+  const layers = copperLayers(design.board);
+  const L = layers.length;
+  const res = opts.grid ?? gridFor(design);
   const W = Math.floor(design.board.width / res) + 1;
   const H = Math.floor(design.board.height / res) + 1;
   const N = W * H;
-  const owner = [new Int32Array(N).fill(FREE), new Int32Array(N).fill(FREE)];
-
+  const boardClear = design.board.clearance;
   const analysis = analyzeCopper(design);
+
+  // Influence radius of the clearance field: the largest clearance + half-width/via radius we will ever test.
+  const classes = [netRules(design, undefined), ...design.netClasses.map((c) => netRules(design, c.nets[0]))];
+  const maxClear = Math.max(boardClear, ...classes.map((c) => c.clearance));
+  const maxHalf = Math.max(baseWidth, ...classes.map((c) => c.traceWidth), ...classes.map((c) => c.viaDiameter), opts.viaDiameter ?? 0) / 2;
+  const fieldR = maxClear * 2 + maxHalf + 2 * res;
+
+  // Per layer: distance to nearest copper (d1, its net n1) and to the nearest copper of a different net (d2).
+  const d1 = layers.map(() => new Float32Array(N).fill(Infinity));
+  const d2 = layers.map(() => new Float32Array(N).fill(Infinity));
+  const n1 = layers.map(() => new Int32Array(N).fill(-1));
   const netIndex = new Map<string, number>();
   const idx = (net: string) => {
     if (!netIndex.has(net)) netIndex.set(net, netIndex.size);
     return netIndex.get(net)!;
   };
   let anon = 1_000_000;
-  const inflate = clearance + width / 2;
+  const surplusOf = (net: string | undefined) => Math.max(0, netRules(design, net).clearance - boardClear);
 
-  const stamp = (layer: number, net: number, bbox: { x0: number; y0: number; x1: number; y1: number }, d: (p: Vec) => number, pad = inflate) => {
-    const gx0 = Math.max(0, Math.floor((bbox.x0 - pad) / res));
-    const gy0 = Math.max(0, Math.floor((bbox.y0 - pad) / res));
-    const gx1 = Math.min(W - 1, Math.ceil((bbox.x1 + pad) / res));
-    const gy1 = Math.min(H - 1, Math.ceil((bbox.y1 + pad) / res));
-    const o = owner[layer];
+  const stamp = (layer: number, net: number, bbox: { x0: number; y0: number; x1: number; y1: number }, d: (p: Vec) => number, surplus: number) => {
+    const gx0 = Math.max(0, Math.floor((bbox.x0 - fieldR) / res));
+    const gy0 = Math.max(0, Math.floor((bbox.y0 - fieldR) / res));
+    const gx1 = Math.min(W - 1, Math.ceil((bbox.x1 + fieldR) / res));
+    const gy1 = Math.min(H - 1, Math.ceil((bbox.y1 + fieldR) / res));
+    const D1 = d1[layer];
+    const D2 = d2[layer];
+    const N1 = n1[layer];
     for (let gy = gy0; gy <= gy1; gy++) {
       for (let gx = gx0; gx <= gx1; gx++) {
-        if (d({ x: gx * res, y: gy * res }) > pad) continue;
+        const dd = d({ x: gx * res, y: gy * res }) - surplus;
+        if (dd > fieldR) continue;
         const i = gy * W + gx;
-        if (o[i] === FREE) o[i] = net;
-        else if (o[i] !== net) o[i] = BLOCKED;
+        if (N1[i] === net) {
+          if (dd < D1[i]) D1[i] = dd;
+        } else if (dd < D1[i]) {
+          // The previous nearest belongs to another net, so it becomes a "different net" distance.
+          if (D1[i] < D2[i]) D2[i] = D1[i];
+          D1[i] = dd;
+          N1[i] = net;
+        } else if (dd < D2[i]) D2[i] = dd;
       }
     }
   };
-  const stampTrace = (layer: number, net: number, pts: Vec[], w: number) => {
+  const stampTrace = (layer: number, net: number, pts: Vec[], w: number, surplus: number) => {
     for (let k = 1; k < pts.length; k++) {
       const a = pts[k - 1];
       const b = pts[k];
       const bbox = { x0: Math.min(a.x, b.x) - w / 2, y0: Math.min(a.y, b.y) - w / 2, x1: Math.max(a.x, b.x) + w / 2, y1: Math.max(a.y, b.y) + w / 2 };
-      stamp(layer, net, bbox, (p) => pointSegmentDistance(p, a, b) - w / 2);
+      stamp(layer, net, bbox, (p) => pointSegmentDistance(p, a, b) - w / 2, surplus);
     }
   };
-  const stampVia = (net: number, v: Vec, d: number) => {
-    for (const l of [0, 1]) stamp(l, net, { x0: v.x - d / 2, y0: v.y - d / 2, x1: v.x + d / 2, y1: v.y + d / 2 }, (p) => Math.hypot(p.x - v.x, p.y - v.y) - d / 2);
+  const stampVia = (net: number, v: Vec, dia: number, surplus: number) => {
+    for (let l = 0; l < L; l++) stamp(l, net, { x0: v.x - dia / 2, y0: v.y - dia / 2, x1: v.x + dia / 2, y1: v.y + dia / 2 }, (p) => Math.hypot(p.x - v.x, p.y - v.y) - dia / 2, surplus);
   };
 
   // Existing copper.
   const padAt = new Map<string, WorldPad>();
   for (const it of analysis.items) {
-    const nets = analysis.clusterNets.get(analysis.clusterOf.get(it.key)!)!;
-    const net = it.kind === "pad" && it.net ? idx(it.net) : nets.size === 1 ? idx([...nets][0]) : anon++;
+    const itemNet = analysis.netOfItem(it);
+    const net = itemNet !== undefined ? idx(itemNet) : anon++;
+    const surplus = surplusOf(itemNet);
     if (it.kind === "pad") {
       const r = padRect(it.pad);
       padAt.set(`${it.pad.world.x.toFixed(4)},${it.pad.world.y.toFixed(4)}`, it.pad);
-      for (const l of it.pad.layers) stamp(LAYERS.indexOf(l), net, r, (p) => segmentRectDistance(p, p, r));
+      for (const l of it.pad.layers) if (layers.includes(l)) stamp(layers.indexOf(l), net, r, (p) => segmentRectDistance(p, p, r), surplus);
     } else if (it.kind === "trace") {
-      stampTrace(LAYERS.indexOf(it.trace.layer), net, it.trace.points, it.trace.width);
+      if (layers.includes(it.trace.layer)) stampTrace(layers.indexOf(it.trace.layer), net, it.trace.points, it.trace.width, surplus);
     } else {
-      stampVia(net, it.via, it.via.diameter);
-    }
-  }
-  // Board edge keepout.
-  const edge = Math.ceil((width / 2 + 0.3) / res);
-  for (const o of owner) {
-    for (let gy = 0; gy < H; gy++) {
-      for (let gx = 0; gx < W; gx++) if (gx < edge || gy < edge || gx >= W - edge || gy >= H - edge) o[gy * W + gx] = BLOCKED;
+      stampVia(net, it.via, it.via.diameter, surplus);
     }
   }
 
   const result: RouteResult = { traces: [], vias: [], routed: 0, failed: [] };
-  const lines = ratsnest(design, analysis).sort((a, b) => Math.hypot(a.a.x - a.b.x, a.a.y - a.b.y) - Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y));
-  const viaR = Math.ceil((viaD / 2 + clearance) / res);
-  const g = new Float32Array(2 * N);
-  const came = new Int32Array(2 * N);
-  const closed = new Uint8Array(2 * N);
+  const lines = ratsnest(design, analysis)
+    .filter((l) => !opts.nets || opts.nets.includes(l.net))
+    .sort((a, b) => Math.hypot(a.a.x - a.b.x, a.a.y - a.b.y) - Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y));
+  const g = new Float32Array(L * N);
+  const came = new Int32Array(L * N);
+  const closed = new Uint8Array(L * N);
   const DIRS = [
     [1, 0, 1],
     [-1, 0, 1],
@@ -211,31 +225,31 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     [-1, 1, Math.SQRT2],
     [-1, -1, Math.SQRT2],
   ];
+  // Diagonal segments between two valid cells can dip slightly closer to obstacles than either end.
+  const margin = res * 0.3;
 
-  for (const line of lines) {
+  const search = (line: (typeof lines)[number], width: number, viaD: number) => {
     const net = idx(line.net);
+    const rules = netRules(design, line.net);
+    const need = Math.max(rules.clearance, boardClear) + width / 2 + margin;
+    const needVia = Math.max(rules.clearance, boardClear) + viaD / 2 + margin;
+    const edge = 0.3 + width / 2;
+    const edgeVia = 0.3 + viaD / 2;
     const pa = padAt.get(`${line.a.x.toFixed(4)},${line.a.y.toFixed(4)}`);
     const pb = padAt.get(`${line.b.x.toFixed(4)},${line.b.y.toFixed(4)}`);
-    const layersA = pa ? pa.layers.map((l) => LAYERS.indexOf(l)) : [0, 1];
-    const layersB = new Set(pb ? pb.layers.map((l) => LAYERS.indexOf(l)) : [0, 1]);
+    const layerIdx = (ls: CopperLayer[] | undefined) => (ls ?? layers).filter((l) => layers.includes(l)).map((l) => layers.indexOf(l));
+    const layersA = layerIdx(pa?.layers);
+    const layersB = new Set(layerIdx(pb?.layers));
     const ax = Math.round(line.a.x / res);
     const ay = Math.round(line.a.y / res);
     const bx = Math.round(line.b.x / res);
     const by = Math.round(line.b.y / res);
-    const free = (l: number, i: number) => {
-      const o = owner[l][i];
-      return o === FREE || o === net;
-    };
+    const clearOf = (l: number, i: number) => (n1[l][i] === net ? d2[l][i] : d1[l][i]);
+    const edgeOk = (gx: number, gy: number, e: number) => gx * res >= e && gy * res >= e && (W - 1 - gx) * res >= e && (H - 1 - gy) * res >= e;
+    const ok = (l: number, gx: number, gy: number) => clearOf(l, gy * W + gx) >= need && edgeOk(gx, gy, edge);
     const viaOk = (gx: number, gy: number) => {
-      for (let dy = -viaR; dy <= viaR; dy++) {
-        for (let dx = -viaR; dx <= viaR; dx++) {
-          if (dx * dx + dy * dy > viaR * viaR) continue;
-          const x = gx + dx;
-          const y = gy + dy;
-          if (x < 0 || y < 0 || x >= W || y >= H) return false;
-          if (!free(0, y * W + x) || !free(1, y * W + x)) return false;
-        }
-      }
+      if (!edgeOk(gx, gy, edgeVia)) return false;
+      for (let l = 0; l < L; l++) if (clearOf(l, gy * W + gx) < needVia) return false;
       return true;
     };
     const h = (gx: number, gy: number) => {
@@ -243,6 +257,8 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
       const dy = Math.abs(gy - by);
       return Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy);
     };
+    // Pads themselves are allowed as start/end cells even when the escape is tight.
+    const isEnd = (gx: number, gy: number) => (gx === ax && gy === ay) || (gx === bx && gy === by);
 
     g.fill(Infinity);
     came.fill(-1);
@@ -253,13 +269,14 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
       g[id] = 0;
       heap.push(id, h(ax, ay));
     }
+    const viaCost = Math.max(12, 1.2 / res);
     let goal = -1;
-    let budget = 400_000;
+    let budget = 3_000_000;
     while (heap.size && budget-- > 0) {
       const id = heap.pop();
       if (closed[id]) continue;
       closed[id] = 1;
-      const l = id >= N ? 1 : 0;
+      const l = Math.floor(id / N);
       const cell = id - l * N;
       const gx = cell % W;
       const gy = (cell - gx) / W;
@@ -271,10 +288,9 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
         const nx = gx + dx;
         const ny = gy + dy;
         if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-        const ni = ny * W + nx;
-        if (!free(l, ni)) continue;
-        if (dx && dy && (!free(l, gy * W + nx) || !free(l, ny * W + gx))) continue;
-        const nid = l * N + ni;
+        if (!ok(l, nx, ny) && !isEnd(nx, ny)) continue;
+        if (dx && dy && ((!ok(l, nx, gy) && !isEnd(nx, gy)) || (!ok(l, gx, ny) && !isEnd(gx, ny)))) continue;
+        const nid = l * N + ny * W + nx;
         // Small penalty for changing direction keeps traces straight.
         const prev = came[id];
         let turn = 0;
@@ -291,15 +307,35 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
           heap.push(nid, ng + h(nx, ny));
         }
       }
-      if (allowVias) {
-        const nid = (1 - l) * N + cell;
-        const ng = g[id] + 12;
-        if (ng < g[nid] && viaOk(gx, gy)) {
+      if (allowVias && L > 1) {
+        let checked: boolean | null = null;
+        for (let l2 = 0; l2 < L; l2++) {
+          if (l2 === l) continue;
+          const nid = l2 * N + cell;
+          const ng = g[id] + viaCost;
+          if (ng >= g[nid]) continue;
+          checked ??= viaOk(gx, gy);
+          if (!checked) break;
           g[nid] = ng;
           came[nid] = id;
           heap.push(nid, ng + h(gx, gy));
         }
       }
+    }
+    return goal;
+  };
+
+  for (const line of lines) {
+    const net = idx(line.net);
+    const rules = netRules(design, line.net);
+    const viaD = opts.viaDiameter ?? rules.viaDiameter;
+    const viaDrill = opts.viaDrill ?? rules.viaDrill;
+    let width = rules.className === "Default" ? baseWidth : rules.traceWidth;
+    let goal = search(line, width, viaD);
+    // Neck down: if a wide net-class trace cannot escape fine-pitch pads, retry at the base width.
+    if (goal < 0 && width > baseWidth) {
+      width = baseWidth;
+      goal = search(line, width, viaD);
     }
     if (goal < 0) {
       result.failed.push(line);
@@ -309,7 +345,7 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     // Reconstruct path and split into per-layer runs.
     const path: { l: number; p: Vec }[] = [];
     for (let id = goal; id >= 0; id = came[id]) {
-      const l = id >= N ? 1 : 0;
+      const l = Math.floor(id / N);
       const cell = id - l * N;
       path.push({ l, p: { x: (cell % W) * res, y: Math.floor(cell / W) * res } });
     }
@@ -318,19 +354,20 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     path[path.length - 1].p = { ...line.b };
     let run: Vec[] = [];
     let runLayer = path[0].l;
+    const surplus = surplusOf(line.net);
     const flush = () => {
       const pts = simplify(run);
       if (pts.length >= 2) {
-        result.traces.push({ layer: LAYERS[runLayer], width, points: pts });
-        stampTrace(runLayer, net, pts, width);
+        result.traces.push({ layer: layers[runLayer], width, points: pts });
+        stampTrace(runLayer, net, pts, width, surplus);
       }
     };
     for (const step of path) {
       if (step.l !== runLayer) {
         flush();
         const v = run[run.length - 1];
-        result.vias.push(v);
-        stampVia(net, v, viaD);
+        result.vias.push({ ...v, diameter: viaD, drill: viaDrill });
+        stampVia(net, v, viaD, surplus);
         run = [v];
         runLayer = step.l;
       }
@@ -360,3 +397,24 @@ function simplify(pts: Vec[]): Vec[] {
   return out.map((p) => ({ x: Math.round(p.x * 1e4) / 1e4, y: Math.round(p.y * 1e4) / 1e4 }));
 }
 
+
+/**
+ * Grid resolution: fine enough that pad centres (placed on a 0.05mm grid) line up with
+ * routing cells for fine-pitch parts, capped so the search grid stays around 2M nodes.
+ */
+export function gridFor(design: Design): number {
+  let minPitch = Infinity;
+  for (const c of design.components) {
+    const pads = getPart(c.partId)?.footprint?.pads ?? [];
+    for (let i = 0; i < pads.length; i++) {
+      for (let j = i + 1; j < pads.length; j++) {
+        const d = Math.hypot(pads[i].x - pads[j].x, pads[i].y - pads[j].y);
+        if (d > 0.05) minPitch = Math.min(minPitch, d);
+      }
+    }
+  }
+  let res = minPitch <= 0.65 ? 0.05 : minPitch < 1.0 ? 0.1 : 0.25;
+  const layers = design.board.layers;
+  while ((design.board.width / res) * (design.board.height / res) * layers > 2_000_000) res = Math.round(res * 2 * 100) / 100;
+  return res;
+}

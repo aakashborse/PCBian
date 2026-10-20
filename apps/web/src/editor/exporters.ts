@@ -1,4 +1,4 @@
-import { bomCsv, gerberFiles, netlistText, pickAndPlaceCsv, type Design } from "@pcbian/core";
+import { bomCsv, gerberFiles, kicadNetlist, kicadPcb, netlistText, pickAndPlaceCsv, type Design } from "@pcbian/core";
 import JSZip from "jszip";
 
 function download(name: string, data: Blob) {
@@ -16,6 +16,8 @@ export const exporters = {
   bom: (d: Design) => download(`${safe(d.name)}-bom.csv`, new Blob([bomCsv(d)], { type: "text/csv" })),
   netlist: (d: Design) => download(`${safe(d.name)}.net.txt`, new Blob([netlistText(d)], { type: "text/plain" })),
   pnp: (d: Design) => download(`${safe(d.name)}-pos.csv`, new Blob([pickAndPlaceCsv(d)], { type: "text/csv" })),
+  kicadPcb: (d: Design) => download(`${safe(d.name)}.kicad_pcb`, new Blob([kicadPcb(d)], { type: "text/plain" })),
+  kicadNet: (d: Design) => download(`${safe(d.name)}.net`, new Blob([kicadNetlist(d)], { type: "text/plain" })),
   json: (d: Design) => download(`${safe(d.name)}.pcbian.json`, new Blob([JSON.stringify(d, null, 2)], { type: "application/json" })),
   async gerbers(d: Design) {
     const zip = new JSZip();
@@ -23,6 +25,7 @@ export const exporters = {
     for (const [file, body] of Object.entries(gerberFiles(named))) zip.file(file, body);
     zip.file(`${named.name}-bom.csv`, bomCsv(d));
     zip.file(`${named.name}-pos.csv`, pickAndPlaceCsv(d));
+    zip.file(`${named.name}.kicad_pcb`, kicadPcb(named));
     download(`${named.name}-fabrication.zip`, await zip.generateAsync({ type: "blob" }));
   },
 };

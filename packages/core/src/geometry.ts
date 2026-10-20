@@ -1,5 +1,5 @@
 import { getPart } from "./library";
-import type { ComponentData, Pad, PcbPlacement, Placement, Rotation, Side, SymbolPin, Vec } from "./types";
+import { ALL_COPPER, type ComponentData, type CopperLayer, type Pad, type PcbPlacement, type Placement, type Rotation, type SymbolPin, type Vec } from "./types";
 
 export function rotate(p: Vec, rot: Rotation): Vec {
   switch (rot) {
@@ -101,7 +101,7 @@ export interface WorldPad extends Pad {
   /** Width/height after rotation (rotations are multiples of 90 degrees). */
   ww: number;
   wh: number;
-  layers: Side[];
+  layers: CopperLayer[];
 }
 
 export function padsOf(c: ComponentData): WorldPad[] {
@@ -116,7 +116,7 @@ export function padsOf(c: ComponentData): WorldPad[] {
     world: toWorld(p, c.pcb, mirror),
     ww: swap ? p.h : p.w,
     wh: swap ? p.w : p.h,
-    layers: p.drill ? ["top", "bottom"] : [c.pcb.side],
+    layers: p.drill ? ALL_COPPER : [c.pcb.side],
   }));
 }
 
@@ -137,4 +137,31 @@ export function courtyardRect(c: ComponentData): Rect | null {
 export function defaultPcbPlacement(index: number): PcbPlacement {
   // Stage new parts in a column to the left of the board until the user places them.
   return { x: -12, y: 4 + (index % 12) * 6, rot: 0, side: "top" };
+}
+
+export function pointInPolygon(p: Vec, poly: Vec[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+/** True when a polyline (or point) touches the inside of a polygon. */
+export function polylineTouchesPolygon(pts: Vec[], poly: Vec[]): boolean {
+  if (pts.some((p) => pointInPolygon(p, poly))) return true;
+  for (let i = 1; i < pts.length; i++) {
+    for (let j = 0; j < poly.length; j++) {
+      if (segmentSegmentDistance(pts[i - 1], pts[i], poly[j], poly[(j + 1) % poly.length]) === 0) return true;
+    }
+  }
+  return false;
+}
+
+export function polygonArea(poly: Vec[]): number {
+  let a = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) a += (poly[j].x + poly[i].x) * (poly[j].y - poly[i].y);
+  return Math.abs(a / 2);
 }

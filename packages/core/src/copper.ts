@@ -1,24 +1,38 @@
-// Copper connectivity, ratsnest and design-rule checks for the PCB.
-import { courtyardRect, dist, padRect, padsOf, pointSegmentDistance, rectsOverlap, segmentRectDistance, segmentSegmentDistance, type Rect, type WorldPad } from "./geometry";
+// Copper connectivity, ratsnest, copper pour (zone) fills and design-rule checks.
+import { copperLayers, netRules } from "./doc";
+import {
+  courtyardRect,
+  dist,
+  padRect,
+  padsOf,
+  pointInPolygon,
+  pointSegmentDistance,
+  polylineTouchesPolygon,
+  rectsOverlap,
+  segmentRectDistance,
+  segmentSegmentDistance,
+  type Rect,
+  type WorldPad,
+} from "./geometry";
 import { getPart } from "./library";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
-import type { CopperLayer, Design, Issue, Net, Trace, Vec, Via } from "./types";
+import { ALL_COPPER, type CopperLayer, type Design, type Issue, type Net, type Trace, type Vec, type Via, type Zone } from "./types";
 
-type Item =
+export type CopperItem =
   | { kind: "pad"; key: string; pad: WorldPad; net?: string }
   | { kind: "trace"; key: string; trace: Trace }
   | { kind: "via"; key: string; via: Via };
 
 const segs = (t: Trace): [Vec, Vec][] => t.points.slice(1).map((p, i) => [t.points[i], p]);
 
-function onLayer(item: Item, layer: CopperLayer): boolean {
+export function itemOnLayer(item: CopperItem, layer: CopperLayer): boolean {
   if (item.kind === "pad") return item.pad.layers.includes(layer);
   if (item.kind === "trace") return item.trace.layer === layer;
   return true;
 }
 
 /** Distance between copper edges of two items on a shared layer (<= 0 means touching). */
-function gap(a: Item, b: Item): number {
+function gap(a: CopperItem, b: CopperItem): number {
   if (a.kind === "trace" && b.kind !== "trace") return gap(b, a);
   if (a.kind === "via" && b.kind === "pad") return gap(b, a);
   if (a.kind === "pad" && b.kind === "pad") {
@@ -28,10 +42,7 @@ function gap(a: Item, b: Item): number {
     const dy = Math.max(0, ra.y0 - rb.y1, rb.y0 - ra.y1);
     return Math.hypot(dx, dy);
   }
-  if (a.kind === "pad" && b.kind === "via") {
-    const r = padRect(a.pad);
-    return segmentRectDistance(b.via, b.via, r) - b.via.diameter / 2;
-  }
+  if (a.kind === "pad" && b.kind === "via") return segmentRectDistance(b.via, b.via, padRect(a.pad)) - b.via.diameter / 2;
   if (a.kind === "via" && b.kind === "via") return dist(a.via, b.via) - (a.via.diameter + b.via.diameter) / 2;
   if (a.kind === "pad" && b.kind === "trace") {
     const r = padRect(a.pad);
@@ -48,22 +59,34 @@ function gap(a: Item, b: Item): number {
   return Infinity;
 }
 
-const sharedLayers = (a: Item, b: Item): CopperLayer[] => (["top", "bottom"] as CopperLayer[]).filter((l) => onLayer(a, l) && onLayer(b, l));
+const sharedLayers = (a: CopperItem, b: CopperItem): CopperLayer[] => ALL_COPPER.filter((l) => itemOnLayer(a, l) && itemOnLayer(b, l));
+
+function itemTouchesZone(it: CopperItem, z: Zone): boolean {
+  if (!itemOnLayer(it, z.layer)) return false;
+  if (it.kind === "pad") {
+    const r = padRect(it.pad);
+    return pointInPolygon(it.pad.world, z.points) || polylineTouchesPolygon([{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }], z.points);
+  }
+  if (it.kind === "via") return pointInPolygon(it.via, z.points);
+  return polylineTouchesPolygon(it.trace.points, z.points);
+}
 
 export interface CopperAnalysis {
   nets: Net[];
-  items: Item[];
-  /** item key -> cluster root */
+  items: CopperItem[];
+  /** item key (or `zone:<id>`) -> cluster root */
   clusterOf: Map<string, string>;
-  /** cluster root -> net names of pads in it */
+  /** cluster root -> net names of pads (and zones) in it */
   clusterNets: Map<string, Set<string>>;
   /** Proximity pairs computed once, reused by DRC. */
-  pairs: { a: Item; b: Item; gap: number }[];
+  pairs: { a: CopperItem; b: CopperItem; gap: number }[];
+  /** Net carried by an item (from its pads or zone), when unambiguous. */
+  netOfItem: (it: CopperItem) => string | undefined;
 }
 
 export function analyzeCopper(design: Design, nets = computeNets(design)): CopperAnalysis {
   const netOf = netByTerminal(nets);
-  const items: Item[] = [];
+  const items: CopperItem[] = [];
   for (const c of design.components) {
     padsOf(c).forEach((pad, i) => items.push({ kind: "pad", key: `pad:${c.id}:${i}`, pad, net: netOf.get(termKey({ comp: c.id, pin: pad.id })) }));
   }
@@ -88,16 +111,72 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
       if (g <= 1e-6) uf.union(a.key, b.key);
     }
   }
-  const clusterOf = new Map<string, string>();
-  const clusterNets = new Map<string, Set<string>>();
-  for (const it of items) {
-    const r = uf.find(it.key);
-    clusterOf.set(it.key, r);
-    if (!clusterNets.has(r)) clusterNets.set(r, new Set());
-    if (it.kind === "pad" && it.net) clusterNets.get(r)!.add(it.net);
+
+  const netsOfRoot = () => {
+    const m = new Map<string, Set<string>>();
+    for (const it of items) {
+      const r = uf.find(it.key);
+      if (!m.has(r)) m.set(r, new Set());
+      if (it.kind === "pad" && it.net) m.get(r)!.add(it.net);
+    }
+    return m;
+  };
+
+  // Zones: a pour connects every same-net item it overlaps; other-net copper is cleared out of the fill.
+  if (design.zones.length) {
+    const pre = netsOfRoot();
+    for (const z of design.zones) {
+      const zk = `zone:${z.id}`;
+      uf.find(zk);
+      for (const it of items) {
+        if (pre.get(uf.find(it.key))?.has(z.net) && itemTouchesZone(it, z)) uf.union(zk, it.key);
+      }
+    }
   }
-  return { nets, items, clusterOf, clusterNets, pairs };
+
+  const clusterOf = new Map<string, string>();
+  for (const it of items) clusterOf.set(it.key, uf.find(it.key));
+  for (const z of design.zones) clusterOf.set(`zone:${z.id}`, uf.find(`zone:${z.id}`));
+  const clusterNets = netsOfRoot();
+  for (const z of design.zones) {
+    const r = uf.find(`zone:${z.id}`);
+    if (!clusterNets.has(r)) clusterNets.set(r, new Set());
+    clusterNets.get(r)!.add(z.net);
+  }
+  const netOfItem = (it: CopperItem) => {
+    if (it.kind === "pad" && it.net) return it.net;
+    const s = clusterNets.get(clusterOf.get(it.key)!);
+    return s && s.size === 1 ? [...s][0] : undefined;
+  };
+  return { nets, items, clusterOf, clusterNets, pairs, netOfItem };
 }
+
+// ---------- zone fills ----------
+
+export type Cutout = { kind: "rect"; rect: Rect } | { kind: "circle"; c: Vec; r: number } | { kind: "line"; points: Vec[]; width: number };
+
+/** The copper a zone actually fills is its outline minus these clearance cut-outs around other-net copper. */
+export function zoneCutouts(design: Design, zone: Zone, analysis = analyzeCopper(design)): Cutout[] {
+  const zRules = netRules(design, zone.net);
+  const out: Cutout[] = [];
+  const zoneCluster = analysis.clusterOf.get(`zone:${zone.id}`);
+  for (const it of analysis.items) {
+    if (!itemOnLayer(it, zone.layer)) continue;
+    if (analysis.clusterOf.get(it.key) === zoneCluster) continue;
+    const net = analysis.netOfItem(it);
+    if (net === zone.net) continue;
+    const cl = Math.max(zRules.clearance, netRules(design, net).clearance);
+    if (it.kind === "pad") {
+      const r = padRect(it.pad);
+      if (it.pad.shape === "circle") out.push({ kind: "circle", c: it.pad.world, r: Math.min(it.pad.ww, it.pad.wh) / 2 + cl });
+      else out.push({ kind: "rect", rect: { x0: r.x0 - cl, y0: r.y0 - cl, x1: r.x1 + cl, y1: r.y1 + cl } });
+    } else if (it.kind === "via") out.push({ kind: "circle", c: it.via, r: it.via.diameter / 2 + cl });
+    else out.push({ kind: "line", points: it.trace.points, width: it.trace.width + 2 * cl });
+  }
+  return out;
+}
+
+// ---------- ratsnest ----------
 
 export interface RatLine {
   net: string;
@@ -146,14 +225,16 @@ export function ratsnest(design: Design, analysis = analyzeCopper(design)): RatL
   return lines;
 }
 
-const itemLabel = (it: Item) => (it.kind === "pad" ? `${it.pad.ref} pad ${it.pad.id}` : it.kind === "trace" ? "trace" : "via");
-const itemPos = (it: Item): Vec => (it.kind === "pad" ? it.pad.world : it.kind === "via" ? it.via : it.trace.points[0]);
+// ---------- DRC ----------
+
+const itemLabel = (it: CopperItem) => (it.kind === "pad" ? `${it.pad.ref} pad ${it.pad.id}` : it.kind === "trace" ? `trace on ${it.trace.layer}` : "via");
+const itemPos = (it: CopperItem): Vec => (it.kind === "pad" ? it.pad.world : it.kind === "via" ? it.via : it.trace.points[0]);
 
 export function runDrc(design: Design): Issue[] {
   const issues: Issue[] = [];
   const analysis = analyzeCopper(design);
   const board: Rect = { x0: 0, y0: 0, x1: design.board.width, y1: design.board.height };
-  const clearance = design.board.clearance;
+  const layers = copperLayers(design.board);
 
   // Shorts: a copper island that joins pads of different nets.
   for (const [root, nets] of analysis.clusterNets) {
@@ -163,13 +244,15 @@ export function runDrc(design: Design): Issue[] {
     }
   }
 
-  // Clearance between copper that is not electrically connected.
+  // Clearance between copper that is not electrically connected (net-class aware).
   for (const { a, b, gap: g } of analysis.pairs) {
-    if (g > 1e-6 && g < clearance && analysis.clusterOf.get(a.key) !== analysis.clusterOf.get(b.key)) {
+    if (g <= 1e-6 || analysis.clusterOf.get(a.key) === analysis.clusterOf.get(b.key)) continue;
+    const required = Math.max(netRules(design, analysis.netOfItem(a)).clearance, netRules(design, analysis.netOfItem(b)).clearance);
+    if (g < required - 1e-9) {
       issues.push({
         severity: "error",
         code: "clearance",
-        message: `Clearance violation (${g.toFixed(3)}mm < ${clearance}mm) between ${itemLabel(a)} and ${itemLabel(b)}`,
+        message: `Clearance violation (${g.toFixed(3)}mm < ${required}mm) between ${itemLabel(a)} and ${itemLabel(b)}`,
         at: itemPos(a),
         refs: [a, b].flatMap((x) => (x.kind === "pad" ? [x.pad.ref] : [])),
       });
@@ -197,8 +280,8 @@ export function runDrc(design: Design): Issue[] {
     for (let j = i + 1; j < placed.length; j++) {
       const a = placed[i];
       const b = placed[j];
-      const bothTht = (c: typeof a) => getPart(c.partId)!.footprint!.pads.some((p) => p.drill);
-      if (a.pcb.side !== b.pcb.side && !bothTht(a) && !bothTht(b)) continue;
+      const tht = (c: typeof a) => getPart(c.partId)!.footprint!.pads.some((p) => p.drill);
+      if (a.pcb.side !== b.pcb.side && !tht(a) && !tht(b)) continue;
       if (rectsOverlap(courtyardRect(a)!, courtyardRect(b)!)) {
         issues.push({ severity: "warning", code: "courtyard_overlap", message: `Courtyards of ${a.ref} and ${b.ref} overlap`, at: { x: a.pcb.x, y: a.pcb.y }, refs: [a.ref, b.ref] });
       }
@@ -206,10 +289,23 @@ export function runDrc(design: Design): Issue[] {
   }
 
   for (const t of design.traces) {
+    const it = analysis.items.find((x) => x.key === `trace:${t.id}`);
+    const rules = netRules(design, it && analysis.netOfItem(it));
+    if (!layers.includes(t.layer)) issues.push({ severity: "error", code: "layer", message: `Trace on ${t.layer} but the board has ${design.board.layers} layers`, at: t.points[0] });
     if (t.width < 0.15) issues.push({ severity: "warning", code: "trace_width", message: `Trace width ${t.width}mm is below the 0.15mm manufacturing minimum`, at: t.points[0] });
+    else if (t.width + 1e-9 < rules.traceWidth) issues.push({ severity: "warning", code: "netclass_width", message: `Trace width ${t.width}mm is narrower than net class ${rules.className} (${rules.traceWidth}mm)`, at: t.points[0] });
     if (t.points.some((p) => p.x < board.x0 || p.y < board.y0 || p.x > board.x1 || p.y > board.y1)) {
       issues.push({ severity: "error", code: "trace_outside", message: "Trace runs outside the board outline", at: t.points[0] });
     }
+  }
+  for (const v of design.vias) {
+    if (v.drill < 0.2) issues.push({ severity: "warning", code: "via_drill", message: `Via drill ${v.drill}mm is below the 0.2mm manufacturing minimum`, at: v });
+    if (v.diameter - v.drill < 0.2) issues.push({ severity: "warning", code: "annular_ring", message: `Via annular ring ${((v.diameter - v.drill) / 2).toFixed(2)}mm is below 0.1mm`, at: v });
+  }
+  const netNames = new Set(analysis.nets.map((n) => n.name));
+  for (const z of design.zones) {
+    if (!layers.includes(z.layer)) issues.push({ severity: "error", code: "layer", message: `Zone ${z.net} is on ${z.layer} but the board has ${design.board.layers} layers`, at: z.points[0] });
+    if (!netNames.has(z.net)) issues.push({ severity: "warning", code: "zone_net", message: `Zone on ${z.layer} uses net ${z.net}, which does not exist in the schematic`, at: z.points[0] });
   }
   return issues;
 }
@@ -220,7 +316,14 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
   const byId = new Map(design.components.map((c) => [c.id, c]));
   for (const n of nets) {
     const phys = n.terminals.filter((t) => getPart(byId.get(t.comp)!.partId)?.kind === "part");
-    if (n.terminals.length === 1 && phys.length === 1) {
+    const isNc = (t: { comp: string; pin: string }) => byId.get(t.comp)!.noConnect?.includes(t.pin) ?? false;
+    for (const t of phys.filter(isNc)) {
+      if (n.terminals.length > 1) {
+        const c = byId.get(t.comp)!;
+        issues.push({ severity: "warning", code: "nc_connected", message: `${c.ref} pin ${t.pin} is marked no-connect but is wired to net ${n.name}`, refs: [c.ref] });
+      }
+    }
+    if (n.terminals.length === 1 && phys.length === 1 && !isNc(phys[0])) {
       const c = byId.get(phys[0].comp)!;
       const pin = getPart(c.partId)!.symbol.pins.find((p) => p.id === phys[0].pin);
       issues.push({ severity: "warning", code: "unconnected_pin", message: `${c.ref} pin ${phys[0].pin} (${pin?.name}) is not connected`, refs: [c.ref] });
@@ -232,5 +335,9 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
   const refs = new Map<string, number>();
   for (const c of design.components) if (getPart(c.partId)?.kind === "part") refs.set(c.ref, (refs.get(c.ref) ?? 0) + 1);
   for (const [ref, n] of refs) if (n > 1) issues.push({ severity: "error", code: "duplicate_ref", message: `Reference ${ref} is used ${n} times`, refs: [ref] });
+  const sheetIds = new Set(design.sheets.map((s) => s.id));
+  for (const c of design.components) {
+    if (c.sheet && !sheetIds.has(c.sheet)) issues.push({ severity: "error", code: "orphan_sheet", message: `${c.ref} is on a sheet that no longer exists`, refs: [c.ref] });
+  }
   return issues;
 }

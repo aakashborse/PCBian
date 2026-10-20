@@ -5,11 +5,12 @@ import { useEditor } from "./context";
 import { useChat } from "./presence";
 
 const SUGGESTIONS = [
-  "Review my schematic for mistakes",
+  "Design a USB-C powered ATmega328P board with a status LED and a 6-pin programming header, then lay it out on 2 layers with a GND pour",
+  "Review my schematic for mistakes and fix them",
   "Add decoupling capacitors to every IC",
-  "Design a 3.3V regulator from USB-C",
-  "Auto-place and route the board",
-  "Explain how this circuit works",
+  "Simulate the circuit and check LED currents",
+  "Lay out and route the board, then make it pass DRC",
+  "Convert this board to 4 layers with GND and power planes",
 ];
 
 /** Minimal, safe Markdown: paragraphs, bullet/numbered lists, **bold** and `code`. */
@@ -96,7 +97,7 @@ export function Copilot({ enabled }: { enabled: boolean | null }) {
         {chat.length === 0 ? (
           <div>
             <p className="muted small" style={{ marginTop: 0 }}>
-              The copilot can read and edit this design: add parts, wire circuits, choose component values, place and route the board, and run checks. Everyone in the project sees the conversation.
+              The copilot is an autonomous hardware engineer. Describe what you want and it will pick or create parts, draw the schematic across sheets, simulate, set up layers and net classes, place, pour and route the board, and iterate until ERC/DRC are clean. Everyone in the project sees the conversation, and you can stop it at any time.
             </p>
             <div className="suggestions">
               {SUGGESTIONS.map((s) => (
@@ -163,10 +164,16 @@ export function Copilot({ enabled }: { enabled: boolean | null }) {
             New chat
           </button>
           <span className="spacer" />
-          <span className="muted small">{busy ? "Working…" : "Enter to send"}</span>
-          <button className="primary" disabled={!enabled || busy || !input.trim()} onClick={() => send(input)}>
-            Send
-          </button>
+          <span className="muted small">{busy ? "Working autonomously…" : "Enter to send"}</span>
+          {busy ? (
+            <button className="danger" onClick={() => api.stopCopilot(projectId).catch((e: Error) => toast(e.message))}>
+              Stop
+            </button>
+          ) : (
+            <button className="primary" disabled={!enabled || !input.trim()} onClick={() => send(input)}>
+              Send
+            </button>
+          )}
         </div>
       </div>
     </>
