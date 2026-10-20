@@ -1,0 +1,23 @@
+{
+  "name": "pcbian",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-based, AI-assisted, collaborative PCB design tool",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @pcbian/server\" \"npm run dev -w @pcbian/web\"",
+    "build": "npm run build -w @pcbian/web",
+    "start": "npm run start -w @pcbian/server",
+    "typecheck": "tsc -p packages/core && tsc -p apps/server && tsc -p apps/web",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

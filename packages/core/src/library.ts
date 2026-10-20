@@ -1,0 +1,282 @@
+// Built-in parts library: schematic symbols paired with footprints.
+import * as fp from "./footprints";
+import type { Footprint, PartDef, PartSymbol, Shape, SymbolPin } from "./types";
+
+// ---------- symbol helpers (schematic units, 10 = one grid step) ----------
+
+const pin = (id: string, name: string, x: number, y: number, side: SymbolPin["side"], length = 10, showName = false, showNumber = false): SymbolPin => ({
+  id,
+  name,
+  x,
+  y,
+  side,
+  length,
+  showName,
+  showNumber,
+});
+
+/** Horizontal two-pin symbol spanning x = -30..30, with the given body glyph. */
+function twoPin(body: Shape[], names: [string, string] = ["1", "2"]): PartSymbol {
+  return {
+    shapes: body,
+    pins: [pin("1", names[0], -30, 0, "left", 10), pin("2", names[1], 30, 0, "right", 10)],
+    refPos: { x: 0, y: -14 },
+    valuePos: { x: 0, y: 20 },
+  };
+}
+
+const resistorBody: Shape[] = [{ kind: "rect", x: -20, y: -6, w: 40, h: 12 }];
+const capacitorBody: Shape[] = [
+  { kind: "line", points: [{ x: -20, y: 0 }, { x: -4, y: 0 }] },
+  { kind: "line", points: [{ x: 4, y: 0 }, { x: 20, y: 0 }] },
+  { kind: "line", points: [{ x: -4, y: -12 }, { x: -4, y: 12 }] },
+  { kind: "line", points: [{ x: 4, y: -12 }, { x: 4, y: 12 }] },
+];
+const polarCapBody: Shape[] = [
+  ...capacitorBody,
+  { kind: "text", x: -11, y: -9, text: "+", size: 9 },
+];
+const inductorBody: Shape[] = [
+  {
+    kind: "line",
+    points: [-15, -5, 5, 15].flatMap((cx) =>
+      Array.from({ length: 9 }, (_, i) => ({ x: cx - 5 * Math.cos((Math.PI * i) / 8), y: -5 * Math.sin((Math.PI * i) / 8) })),
+    ),
+  },
+];
+const diodeBody = (extra: Shape[] = []): Shape[] => [
+  { kind: "line", points: [{ x: -20, y: 0 }, { x: 20, y: 0 }] },
+  { kind: "polygon", points: [{ x: 8, y: 0 }, { x: -8, y: -9 }, { x: -8, y: 9 }], fill: false },
+  { kind: "line", points: [{ x: 8, y: -9 }, { x: 8, y: 9 }] },
+  ...extra,
+];
+// Diode symbols in this library are drawn anode-left; pin 1 = K is on the right.
+const diodeSymbol = (extra: Shape[] = []): PartSymbol => {
+  const s = twoPin(diodeBody(extra));
+  s.pins = [pin("2", "A", -30, 0, "left"), pin("1", "K", 30, 0, "right")];
+  return s;
+};
+const ledArrows: Shape[] = [
+  { kind: "line", points: [{ x: 0, y: -12 }, { x: 8, y: -20 }] },
+  { kind: "polygon", points: [{ x: 8, y: -20 }, { x: 3, y: -19 }, { x: 7, y: -15 }], fill: true },
+  { kind: "line", points: [{ x: 6, y: -10 }, { x: 14, y: -18 }] },
+  { kind: "polygon", points: [{ x: 14, y: -18 }, { x: 9, y: -17 }, { x: 13, y: -13 }], fill: true },
+];
+const switchBody: Shape[] = [
+  { kind: "circle", x: -16, y: 0, r: 2 },
+  { kind: "circle", x: 16, y: 0, r: 2 },
+  { kind: "line", points: [{ x: -16, y: -6 }, { x: 16, y: -6 }] },
+  { kind: "line", points: [{ x: 0, y: -6 }, { x: 0, y: -14 }] },
+  { kind: "line", points: [{ x: -20, y: 0 }, { x: -18, y: 0 }] },
+  { kind: "line", points: [{ x: 18, y: 0 }, { x: 20, y: 0 }] },
+];
+const crystalBody: Shape[] = [
+  { kind: "rect", x: -5, y: -10, w: 10, h: 20 },
+  { kind: "line", points: [{ x: -10, y: -12 }, { x: -10, y: 12 }] },
+  { kind: "line", points: [{ x: 10, y: -12 }, { x: 10, y: 12 }] },
+  { kind: "line", points: [{ x: -20, y: 0 }, { x: -10, y: 0 }] },
+  { kind: "line", points: [{ x: 10, y: 0 }, { x: 20, y: 0 }] },
+];
+const fuseBody: Shape[] = [
+  { kind: "rect", x: -16, y: -6, w: 32, h: 12 },
+  { kind: "line", points: [{ x: -20, y: 0 }, { x: 20, y: 0 }] },
+];
+
+/** Rectangular IC symbol. Pins are listed top to bottom on each side as [number, name]. */
+export function icSymbol(left: [string, string][], right: [string, string][], label = ""): PartSymbol {
+  const rows = Math.max(left.length, right.length);
+  const h = (rows + 1) * 10;
+  const longest = Math.max(...[...left, ...right].map(([, n]) => n.length), 3);
+  const halfW = Math.max(30, Math.ceil((longest * 5.5 * 2 + 20) / 20) * 10);
+  const top = -Math.floor(rows / 2) * 10 - 10;
+  const pins: SymbolPin[] = [];
+  left.forEach(([id, name], i) => pins.push(pin(id, name, -halfW - 20, top + (i + 1) * 10, "left", 20, true, true)));
+  right.forEach(([id, name], i) => pins.push(pin(id, name, halfW + 20, top + (i + 1) * 10, "right", 20, true, true)));
+  const shapes: Shape[] = [{ kind: "rect", x: -halfW, y: top, w: halfW * 2, h }];
+  if (label) shapes.push({ kind: "text", x: 0, y: top + h / 2 + 3, text: label, size: 8, anchor: "middle" });
+  return { shapes, pins, refPos: { x: -halfW, y: top - 6 }, valuePos: { x: -halfW, y: top + h + 12 } };
+}
+
+function transistorSymbol(kind: "npn" | "nmos"): PartSymbol {
+  const shapes: Shape[] =
+    kind === "npn"
+      ? [
+          { kind: "circle", x: 5, y: 0, r: 16 },
+          { kind: "line", points: [{ x: -20, y: 0 }, { x: -2, y: 0 }] },
+          { kind: "line", points: [{ x: -2, y: -10 }, { x: -2, y: 10 }] },
+          { kind: "line", points: [{ x: -2, y: -4 }, { x: 10, y: -14 }, { x: 10, y: -20 }] },
+          { kind: "line", points: [{ x: -2, y: 4 }, { x: 10, y: 14 }, { x: 10, y: 20 }] },
+          { kind: "polygon", points: [{ x: 10, y: 14 }, { x: 3, y: 13 }, { x: 7, y: 8 }], fill: true },
+        ]
+      : [
+          { kind: "circle", x: 5, y: 0, r: 16 },
+          { kind: "line", points: [{ x: -20, y: 0 }, { x: -6, y: 0 }, { x: -6, y: -10 }] },
+          { kind: "line", points: [{ x: -1, y: -11 }, { x: -1, y: 11 }] },
+          { kind: "line", points: [{ x: -1, y: -8 }, { x: 10, y: -8 }, { x: 10, y: -20 }] },
+          { kind: "line", points: [{ x: -1, y: 8 }, { x: 10, y: 8 }, { x: 10, y: 20 }] },
+          { kind: "line", points: [{ x: -1, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 8 }] },
+        ];
+  const names = kind === "npn" ? { b: "B", c: "C", e: "E" } : { b: "G", c: "D", e: "S" };
+  // SOT-23 pinout: 1 = B/G, 2 = E/S, 3 = C/D
+  return {
+    shapes,
+    pins: [pin("1", names.b, -30, 0, "left"), pin("3", names.c, 10, -30, "top"), pin("2", names.e, 10, 30, "bottom")],
+    refPos: { x: 24, y: -4 },
+    valuePos: { x: 24, y: 10 },
+  };
+}
+
+function powerSymbol(kind: "gnd" | "rail"): PartSymbol {
+  const shapes: Shape[] =
+    kind === "gnd"
+      ? [
+          { kind: "line", points: [{ x: 0, y: 0 }, { x: 0, y: 10 }] },
+          { kind: "line", points: [{ x: -10, y: 10 }, { x: 10, y: 10 }] },
+          { kind: "line", points: [{ x: -6, y: 14 }, { x: 6, y: 14 }] },
+          { kind: "line", points: [{ x: -2, y: 18 }, { x: 2, y: 18 }] },
+        ]
+      : [
+          { kind: "line", points: [{ x: 0, y: 0 }, { x: 0, y: -10 }] },
+          { kind: "line", points: [{ x: -8, y: -10 }, { x: 8, y: -10 }] },
+        ];
+  return {
+    shapes,
+    pins: [pin("1", "1", 0, 0, kind === "gnd" ? "top" : "bottom", 0)],
+    refPos: { x: 0, y: 0 },
+    valuePos: kind === "gnd" ? { x: 0, y: 30 } : { x: 0, y: -15 },
+  };
+}
+
+const netLabelSymbol: PartSymbol = {
+  shapes: [{ kind: "line", points: [{ x: 0, y: 0 }, { x: 6, y: -6 }, { x: 40, y: -6 }, { x: 40, y: 6 }, { x: 6, y: 6 }, { x: 0, y: 0 }] }],
+  pins: [pin("1", "1", 0, 0, "left", 0)],
+  refPos: { x: 0, y: 0 },
+  valuePos: { x: 9, y: 3 },
+};
+
+// ---------- library ----------
+
+interface PartInput extends Omit<PartDef, "kind" | "keywords"> {
+  kind?: PartDef["kind"];
+  keywords?: string[];
+}
+const part = (p: PartInput): PartDef => ({ kind: "part", keywords: [], ...p });
+
+const passive = (id: string, name: string, prefix: string, value: string, body: Shape[], footprint: Footprint, description: string, keywords: string[]) =>
+  part({ id, name, category: "Passives", refPrefix: prefix, defaultValue: value, symbol: twoPin(body), footprint, description, keywords });
+
+export const PARTS: PartDef[] = [
+  passive("resistor_0603", "Resistor (0603)", "R", "10k", resistorBody, fp.chip("0603"), "Thick-film chip resistor, 0603 (1608 metric), 1/10 W.", ["resistor", "res", "pullup", "pulldown"]),
+  passive("resistor_0805", "Resistor (0805)", "R", "1k", resistorBody, fp.chip("0805"), "Thick-film chip resistor, 0805 (2012 metric), 1/8 W.", ["resistor", "res"]),
+  passive("capacitor_0603", "Capacitor (0603)", "C", "100nF", capacitorBody, fp.chip("0603"), "MLCC ceramic capacitor, 0603, X7R. Typical decoupling cap.", ["capacitor", "cap", "decoupling", "bypass", "mlcc"]),
+  passive("capacitor_0805", "Capacitor (0805)", "C", "10uF", capacitorBody, fp.chip("0805"), "MLCC ceramic capacitor, 0805, X5R. Bulk decoupling.", ["capacitor", "cap", "bulk", "mlcc"]),
+  passive("capacitor_electrolytic", "Electrolytic Capacitor (radial 5mm)", "C", "100uF", polarCapBody, fp.radialCap(5, 2), "Aluminium electrolytic capacitor, radial, D5mm P2mm. Pin 1 = +.", ["capacitor", "electrolytic", "polarized", "bulk"]),
+  passive("inductor_0805", "Inductor (0805)", "L", "10uH", inductorBody, fp.chip("0805"), "Chip inductor, 0805.", ["inductor", "coil", "choke"]),
+  passive("ferrite_0603", "Ferrite Bead (0603)", "FB", "600R@100MHz", resistorBody, fp.chip("0603"), "Ferrite bead for power filtering, 0603.", ["ferrite", "bead", "emi", "filter"]),
+  passive("fuse_1206", "Fuse (1206)", "F", "500mA", fuseBody, fp.chip("1206"), "Resettable PTC fuse, 1206.", ["fuse", "ptc", "polyfuse", "protection"]),
+  part({ id: "led_0603", name: "LED (0603)", category: "Discrete", refPrefix: "D", defaultValue: "Red", symbol: { ...diodeSymbol(ledArrows), refPos: { x: -10, y: -16 } }, footprint: fp.chip("0603"), description: "Indicator LED, 0603. Pin 1 = cathode (K), pin 2 = anode (A). Vf ~2V for red, ~3V for blue/white.", keywords: ["led", "light", "indicator", "diode"] }),
+  part({ id: "diode_sod123", name: "Diode (SOD-123)", category: "Discrete", refPrefix: "D", defaultValue: "1N4148W", mpn: "1N4148W", symbol: diodeSymbol(), footprint: fp.sod123(), description: "Small-signal switching diode. Pin 1 = K, pin 2 = A.", keywords: ["diode", "rectifier", "signal"] }),
+  part({ id: "schottky_sod123", name: "Schottky Diode (SOD-123)", category: "Discrete", refPrefix: "D", defaultValue: "SS14", mpn: "B5819W", symbol: diodeSymbol([{ kind: "line", points: [{ x: 8, y: -9 }, { x: 12, y: -9 }] }, { kind: "line", points: [{ x: 8, y: 9 }, { x: 4, y: 9 }] }]), footprint: fp.sod123(), description: "1A 40V Schottky diode, reverse-polarity protection. Pin 1 = K.", keywords: ["schottky", "diode", "protection"] }),
+  part({ id: "npn_sot23", name: "NPN Transistor (SOT-23)", category: "Discrete", refPrefix: "Q", defaultValue: "MMBT3904", mpn: "MMBT3904", symbol: transistorSymbol("npn"), footprint: fp.sot23(), description: "General purpose NPN BJT, 40V 200mA. Pins: 1=B, 2=E, 3=C.", keywords: ["transistor", "bjt", "npn", "switch"] }),
+  part({ id: "nmos_sot23", name: "N-MOSFET (SOT-23)", category: "Discrete", refPrefix: "Q", defaultValue: "AO3400A", mpn: "AO3400A", symbol: transistorSymbol("nmos"), footprint: fp.sot23(), description: "Logic-level N-channel MOSFET, 30V 5.7A. Pins: 1=G, 2=S, 3=D.", keywords: ["mosfet", "fet", "nmos", "switch", "transistor"] }),
+  part({ id: "button_6mm", name: "Push Button (6mm THT)", category: "Electromechanical", refPrefix: "SW", defaultValue: "SW_Push", symbol: twoPin(switchBody), footprint: fp.tactSwitch6mm(), description: "6x6mm tactile push button, normally open.", keywords: ["button", "switch", "tactile", "reset"] }),
+  part({ id: "crystal_hc49", name: "Crystal (HC-49)", category: "Frequency", refPrefix: "Y", defaultValue: "16MHz", symbol: twoPin(crystalBody), footprint: fp.hc49(), description: "Quartz crystal, HC-49/U through-hole. Needs two load capacitors (typ. 22pF) to GND.", keywords: ["crystal", "oscillator", "xtal", "clock"] }),
+  ...[2, 3, 4, 6].map((n) =>
+    part({
+      id: `header_1x${n}`,
+      name: `Pin Header 1x${n} (2.54mm)`,
+      category: "Connectors",
+      refPrefix: "J",
+      defaultValue: `Conn_01x${n}`,
+      symbol: icSymbol(Array.from({ length: n }, (_, i) => [String(i + 1), `Pin_${i + 1}`] as [string, string]), [], ""),
+      footprint: fp.header(n),
+      description: `Single row ${n}-pin male header, 2.54mm pitch.`,
+      keywords: ["header", "connector", "pin", "jumper"],
+    }),
+  ),
+  part({
+    id: "usb_c_power",
+    name: "USB-C Receptacle (USB 2.0)",
+    category: "Connectors",
+    refPrefix: "J",
+    defaultValue: "USB_C",
+    symbol: icSymbol([["A4", "VBUS"], ["A5", "CC1"], ["B5", "CC2"], ["A6", "D+"], ["A7", "D-"], ["A1", "GND"], ["S1", "SHIELD"]], [], "USB-C"),
+    footprint: fp.usbC(),
+    description: "USB Type-C receptacle, USB 2.0 subset. CC1/CC2 need 5.1k pulldowns to GND for a sink to get 5V.",
+    keywords: ["usb", "usb-c", "type-c", "connector", "power"],
+  }),
+  part({
+    id: "ams1117_33",
+    name: "AMS1117-3.3 LDO",
+    category: "Power",
+    refPrefix: "U",
+    defaultValue: "AMS1117-3.3",
+    mpn: "AMS1117-3.3",
+    symbol: icSymbol([["3", "VIN"], ["1", "GND"]], [["2", "VOUT"], ["4", "TAB"]], "LDO"),
+    footprint: fp.sot223(),
+    description: "1A low dropout 3.3V linear regulator. Pins: 1=GND, 2=VOUT, 3=VIN, 4=TAB (VOUT). Needs 10uF on input and output.",
+    keywords: ["regulator", "ldo", "3.3v", "power", "linear"],
+  }),
+  part({
+    id: "ne555_dip8",
+    name: "NE555 Timer (DIP-8)",
+    category: "ICs",
+    refPrefix: "U",
+    defaultValue: "NE555",
+    mpn: "NE555P",
+    symbol: icSymbol([["8", "VCC"], ["4", "RESET"], ["2", "TRIG"], ["6", "THR"], ["5", "CV"]], [["3", "OUT"], ["7", "DISCH"], ["1", "GND"]], "555"),
+    footprint: fp.dip(8),
+    description: "Precision timer, astable/monostable. Supply 4.5-16V.",
+    keywords: ["555", "timer", "oscillator", "astable", "blinker"],
+  }),
+  part({
+    id: "lm358_soic8",
+    name: "LM358 Dual Op-Amp (SOIC-8)",
+    category: "ICs",
+    refPrefix: "U",
+    defaultValue: "LM358",
+    mpn: "LM358DR",
+    symbol: icSymbol([["3", "+INA"], ["2", "-INA"], ["5", "+INB"], ["6", "-INB"]], [["1", "OUTA"], ["7", "OUTB"], ["8", "V+"], ["4", "V-"]], "LM358"),
+    footprint: fp.soic(8),
+    description: "Dual low-power operational amplifier, single supply 3-32V.",
+    keywords: ["opamp", "op-amp", "amplifier", "comparator"],
+  }),
+  part({
+    id: "atmega328p_tqfp32",
+    name: "ATmega328P (TQFP-32)",
+    category: "Microcontrollers",
+    refPrefix: "U",
+    defaultValue: "ATmega328P-AU",
+    mpn: "ATMEGA328P-AU",
+    symbol: icSymbol(
+      [["4", "VCC"], ["6", "VCC"], ["18", "AVCC"], ["20", "AREF"], ["29", "PC6/RESET"], ["7", "PB6/XTAL1"], ["8", "PB7/XTAL2"], ["3", "GND"], ["5", "GND"], ["21", "GND"], ["19", "ADC6"], ["22", "ADC7"]],
+      [["12", "PB0"], ["13", "PB1"], ["14", "PB2/SS"], ["15", "PB3/MOSI"], ["16", "PB4/MISO"], ["17", "PB5/SCK"], ["23", "PC0/A0"], ["24", "PC1/A1"], ["25", "PC2/A2"], ["26", "PC3/A3"], ["27", "PC4/SDA"], ["28", "PC5/SCL"], ["30", "PD0/RXD"], ["31", "PD1/TXD"], ["32", "PD2"], ["1", "PD3"], ["2", "PD4"], ["9", "PD5"], ["10", "PD6"], ["11", "PD7"]],
+      "ATmega328P",
+    ),
+    footprint: fp.qfp(32, 0.8, 8.4),
+    description: "8-bit AVR MCU, 32KB flash, 2KB SRAM, 20MHz. Arduino Uno core. Needs 100nF decoupling per VCC pin, 10k RESET pullup, crystal on XTAL1/XTAL2.",
+    keywords: ["mcu", "microcontroller", "avr", "arduino", "atmega"],
+  }),
+  // ----- power symbols and net labels -----
+  part({ id: "power_gnd", name: "GND", category: "Power Symbols", kind: "power", refPrefix: "#PWR", defaultValue: "GND", symbol: powerSymbol("gnd"), footprint: null, description: "Ground power symbol. All GND symbols share one net.", keywords: ["gnd", "ground"] }),
+  part({ id: "power_rail", name: "Power Rail", category: "Power Symbols", kind: "power", refPrefix: "#PWR", defaultValue: "+3V3", symbol: powerSymbol("rail"), footprint: null, description: "Power rail symbol (e.g. +3V3, +5V, VBUS). The value is the net name; all rails with the same value are connected.", keywords: ["vcc", "vdd", "3v3", "5v", "power", "rail"] }),
+  part({ id: "net_label", name: "Net Label", category: "Power Symbols", kind: "netlabel", refPrefix: "#LBL", defaultValue: "NET", symbol: netLabelSymbol, footprint: null, description: "Named net label. Pins attached to labels with the same value are connected.", keywords: ["label", "net", "name"] }),
+];
+
+const BY_ID = new Map(PARTS.map((p) => [p.id, p]));
+
+export function getPart(id: string): PartDef | undefined {
+  return BY_ID.get(id);
+}
+
+export function searchParts(query: string, limit = 10): PartDef[] {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return PARTS.slice(0, limit);
+  const scored = PARTS.map((p) => {
+    const hay = [p.id, p.name, p.category, p.description, p.defaultValue, p.mpn ?? "", ...(p.keywords ?? [])].join(" ").toLowerCase();
+    const score = terms.reduce((s, t) => s + (hay.includes(t) ? 1 + ((p.keywords ?? []).includes(t) ? 1 : 0) : 0), 0);
+    return { p, score };
+  }).filter((x) => x.score > 0);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((x) => x.p);
+}
