@@ -14,7 +14,7 @@ export function useProjectConnection(id: string): { conn: ProjectConnection; syn
     const doc = new Y.Doc();
     const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/yjs`;
     const provider = new WebsocketProvider(url, id, doc);
-    const undo = new Y.UndoManager(["components", "wires", "traces", "vias", "zones", "parts", "keepouts", "schGraphics", "pcbGraphics", "meta"].map((k) => doc.getMap(k)), { captureTimeout: 400 });
+    const undo = new Y.UndoManager(["components", "wires", "traces", "vias", "zones", "parts", "keepouts", "schGraphics", "pcbGraphics", "meta", "comments"].map((k) => doc.getMap(k)), { captureTimeout: 400 });
     return { doc, provider, undo };
   }, [id]);
   const [synced, setSynced] = useState(false);

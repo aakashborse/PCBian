@@ -1,7 +1,8 @@
 // Import KiCad 6/7/8 projects: schematics (.kicad_sch, multi-sheet/hierarchical) and boards (.kicad_pcb).
 // Connectivity is resolved from KiCad geometry, then rebuilt in PCBian as pin-to-pin wires and labels.
 import type * as Y from "yjs";
-import { addComponent, addCustomPart, addKeepout, addSchGraphic, addSheet, addTrace, addVia, addWire, addZone, componentsMap, copperLayers, getDesign, renameSheet, setBoard, setBoardOutline, sheetPartId, updateComponent } from "./doc";
+import { addComponent, addCustomPart, addKeepout, addSchGraphic, addSheet, addTrace, addVia, addWire, addZone, componentsMap, getDesign, renameSheet, setBoard, setBoardOutline, sheetPartId, updateComponent } from "./doc";
+import { copperLayers, fromKicadLayerName } from "./stackup";
 import { analyzeCopper } from "./copper";
 import { attachNet } from "./edit";
 import * as fp from "./footprints";
@@ -9,7 +10,7 @@ import { rotate } from "./geometry";
 import { symbolFromSExpr, parseSExpr, type SExpr } from "./kicad";
 import { getPart, icSymbol } from "./library";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
-import type { CopperLayer, Footprint, Pad, PartDef, PcbPlacement, Rotation, Shape, Terminal, Vec } from "./types";
+import { ALL_COPPER, type CopperLayer, type Footprint, type Pad, type PartDef, type PcbPlacement, type Rotation, type Shape, type Terminal, type Vec } from "./types";
 
 const isList = (e: SExpr): e is SExpr[] => Array.isArray(e);
 const head = (e: SExpr) => (isList(e) && typeof e[0] === "string" ? e[0] : "");
@@ -47,7 +48,7 @@ export interface KicadImportReport {
 
 // ---------- board parsing ----------
 
-interface PcbFootprint {
+export interface PcbFootprint {
   ref: string;
   value: string;
   lib: string;
@@ -57,7 +58,6 @@ interface PcbFootprint {
   nets: Map<string, string>;
 }
 
-const LAYER: Record<string, CopperLayer> = { "F.Cu": "top", "In1.Cu": "in1", "In2.Cu": "in2", "B.Cu": "bottom" };
 
 function parsePcbFootprint(f: SExpr[], warnings: string[]): PcbFootprint | null {
   const layer = kid(f, "layer")?.[1] as string;
@@ -131,15 +131,30 @@ function parsePcbFootprint(f: SExpr[], warnings: string[]): PcbFootprint | null 
   return { ref, value, lib, placement: { x: pos.x, y: pos.y, rot, side }, footprint: { name: lib.replace(/^.*:/, ""), pads, courtyard: { w: r4(cw), h: r4(ch) }, silk }, nets };
 }
 
-interface PcbData {
+export interface PcbData {
   footprints: PcbFootprint[];
   traces: { layer: CopperLayer; width: number; points: Vec[] }[];
-  vias: { x: number; y: number; diameter: number; drill: number }[];
-  zones: { net: string; layer: CopperLayer; points: Vec[] }[];
+  vias: { x: number; y: number; diameter: number; drill: number; from?: CopperLayer; to?: CopperLayer }[];
+  zones: ({ net: string; layer: CopperLayer; points: Vec[] } & ReturnType<typeof zoneStyle>)[];
   keepouts: { layers: CopperLayer[]; points: Vec[]; noTracks: boolean; noVias: boolean; noPours: boolean }[];
   outline: Vec[][];
   thickness: number;
-  layers: 2 | 4;
+  layers: number;
+}
+
+/** Fill style, priority and pad connection of a KiCad zone. */
+function zoneStyle(z: SExpr[]) {
+  const fill = kid(z, "fill") ?? [];
+  const hatch = kid(fill, "mode")?.[1] === "hatch";
+  const connect = kid(z, "connect_pads");
+  const priority = num(kid(z, "priority"), 1, 0);
+  return {
+    ...(priority ? { priority } : {}),
+    ...(hatch ? { fill: "hatch" as const, hatchWidth: num(kid(fill, "hatch_thickness"), 1, 0.25), hatchGap: num(kid(fill, "hatch_gap"), 1, 1) } : {}),
+    ...(connect?.[1] === "yes" ? { padConnection: "solid" as const } : {}),
+    ...(kid(fill, "thermal_gap") ? { thermalGap: num(kid(fill, "thermal_gap"), 1, 0.5) } : {}),
+    ...(kid(fill, "thermal_bridge_width") ? { spokeWidth: num(kid(fill, "thermal_bridge_width"), 1, 0.5) } : {}),
+  };
 }
 
 function parsePcb(text: string, warnings: string[]): PcbData {
@@ -147,7 +162,7 @@ function parsePcb(text: string, warnings: string[]): PcbData {
   if (head(root) !== "kicad_pcb") throw new Error("Not a KiCad board file (.kicad_pcb)");
   const layerDefs = (kid(root, "layers") ?? []).filter(isList) as SExpr[][];
   const copperCount = layerDefs.filter((l) => /\.Cu$/.test(String(l[1]))).length;
-  if (copperCount > 4) warnings.push(`Board has ${copperCount} copper layers; layers beyond In2 are not imported`);
+  if (copperCount > 32) warnings.push(`Board has ${copperCount} copper layers; only 32 are supported`);
   const footprints: PcbFootprint[] = [];
   for (const f of [...kids(root, "footprint"), ...kids(root, "module")]) {
     const p = parsePcbFootprint(f, warnings);
@@ -155,17 +170,20 @@ function parsePcb(text: string, warnings: string[]): PcbData {
   }
   const traces: PcbData["traces"] = [];
   for (const s of kids(root, "segment")) {
-    const layer = LAYER[kid(s, "layer")?.[1] as string];
+    const layer = fromKicadLayerName(String(kid(s, "layer")?.[1] ?? ""));
     if (!layer) continue;
     traces.push({ layer, width: num(kid(s, "width"), 1, 0.25), points: [{ x: num(kid(s, "start"), 1), y: num(kid(s, "start"), 2) }, { x: num(kid(s, "end"), 1), y: num(kid(s, "end"), 2) }] });
   }
   for (const s of kids(root, "arc")) {
-    const layer = LAYER[kid(s, "layer")?.[1] as string];
+    const layer = fromKicadLayerName(String(kid(s, "layer")?.[1] ?? ""));
     if (!layer) continue;
     traces.push({ layer, width: num(kid(s, "width"), 1, 0.25), points: ["start", "mid", "end"].map((k) => ({ x: num(kid(s, k), 1), y: num(kid(s, k), 2) })) });
   }
-  const vias = kids(root, "via").map((v) => ({ x: num(kid(v, "at"), 1), y: num(kid(v, "at"), 2), diameter: num(kid(v, "size"), 1, 0.6), drill: num(kid(v, "drill"), 1, 0.3) }));
-  if (kids(root, "via").some((v) => kid(v, "layers") && (kid(v, "layers")!.length !== 3 || kid(v, "layers")![1] !== "F.Cu" || kid(v, "layers")![2] !== "B.Cu"))) warnings.push("Blind/buried vias were imported as through vias");
+  // Blind/buried/micro vias keep their layer span.
+  const vias = kids(root, "via").map((v) => {
+    const ls = (kid(v, "layers") ?? []).slice(1).map((x) => fromKicadLayerName(String(x)) ?? undefined);
+    return { x: num(kid(v, "at"), 1), y: num(kid(v, "at"), 2), diameter: num(kid(v, "size"), 1, 0.6), drill: num(kid(v, "drill"), 1, 0.3), from: ls[0], to: ls[1] };
+  });
   const zones: PcbData["zones"] = [];
   const keepouts: PcbData["keepouts"] = [];
   for (const z of kids(root, "zone")) {
@@ -175,15 +193,15 @@ function parsePcb(text: string, warnings: string[]): PcbData {
     const ko = kid(z, "keepout");
     if (ko) {
       // Rule areas: "*.Cu" and "F&B.Cu" expand to the copper layers they cover.
-      const layers = [...new Set(layerNames.flatMap((ln): CopperLayer[] => (ln === "*.Cu" ? ["top", "in1", "in2", "bottom"] : ln === "F&B.Cu" ? ["top", "bottom"] : LAYER[ln] ? [LAYER[ln]] : [])))];
+      const layers = [...new Set(layerNames.flatMap((ln): CopperLayer[] => (ln === "*.Cu" ? ALL_COPPER : ln === "F&B.Cu" ? ["top", "bottom"] : fromKicadLayerName(ln) ? [fromKicadLayerName(ln)!] : [])))];
       const banned = (k: string) => kid(ko, k)?.[1] === "not_allowed";
       if (layers.length && poly.length >= 3) keepouts.push({ layers, points: poly, noTracks: banned("tracks"), noVias: banned("vias"), noPours: banned("copperpour") });
       if (banned("footprints") || banned("pads")) warnings.push("Keepout footprint/pad restrictions are not enforced");
       continue;
     }
     for (const ln of layerNames) {
-      const layer = LAYER[ln];
-      if (layer && net && poly.length >= 3) zones.push({ net, layer, points: poly });
+      const layer = fromKicadLayerName(ln);
+      if (layer && net && poly.length >= 3) zones.push({ net, layer, points: poly, ...zoneStyle(z) });
     }
   }
   // Board outline from Edge.Cuts graphics.
@@ -208,7 +226,7 @@ function parsePcb(text: string, warnings: string[]): PcbData {
   }
   loops.push(...chainSegments(segs));
   const thickness = num(kid(kid(root, "general") ?? [], "thickness"), 1, 1.6);
-  return { footprints, traces, vias, zones, keepouts, outline: loops, thickness, layers: copperCount > 2 ? 4 : 2 };
+  return { footprints, traces, vias, zones, keepouts, outline: loops, thickness, layers: Math.max(2, Math.min(32, Math.ceil(copperCount / 2) * 2)) };
 }
 
 /** Join loose outline segments end to end into closed loops. */
@@ -325,8 +343,28 @@ function symbolInstances(
 
 export function importKicadProject(doc: Y.Doc, input: KicadImportInput): KicadImportReport {
   const warnings: string[] = [];
-  const report: KicadImportReport = { components: 0, nets: 0, sheets: 0, traces: 0, vias: 0, zones: 0, warnings };
   const pcb = input.pcb ? parsePcb(input.pcb, warnings) : null;
+  return importBoard(doc, pcb, warnings, input.schematics?.length ? (ctx) => importKicadSchematics(ctx, input.schematics!) : undefined, "KiCad");
+}
+
+/** Shared state handed to a format-specific schematic importer. */
+export interface ImportCtx {
+  doc: Y.Doc;
+  report: KicadImportReport;
+  warnings: string[];
+  pcbByRef: Map<string, PcbFootprint>;
+  makePart: (sig: string, build: () => PartDef) => PartDef;
+  uidPart: () => string;
+  pcbPlacement: (ref: string) => Partial<PcbPlacement> | undefined;
+  placed: Set<string>;
+}
+
+/**
+ * Format-neutral import: the board (if any) as parsed board data, plus an optional schematic
+ * importer. Without a schematic, symbols are generated from footprints and nets become labels.
+ */
+export function importBoard(doc: Y.Doc, pcb: PcbData | null, warnings: string[], schematic: ((ctx: ImportCtx) => void) | undefined, source: string): KicadImportReport {
+  const report: KicadImportReport = { components: 0, nets: 0, sheets: 0, traces: 0, vias: 0, zones: 0, warnings };
 
   // Board origin: shift everything so the outline's top-left corner is (0,0).
   let shift = { x: 0, y: 0 };
@@ -346,11 +384,11 @@ export function importKicadProject(doc: Y.Doc, input: KicadImportInput): KicadIm
     }
     return p;
   };
-  const uidPart = () => `kicad_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  const uidPart = () => `${source.toLowerCase()}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
   const placed = new Set<string>();
 
   doc.transact(() => {
-    if (input.schematics?.length) importSchematics();
+    if (schematic) schematic({ doc, report, warnings, pcbByRef, makePart, uidPart, pcbPlacement, placed });
     else if (pcb) importBoardOnlyComponents();
     if (pcb) importBoardCopper();
   });
@@ -365,9 +403,110 @@ export function importKicadProject(doc: Y.Doc, input: KicadImportInput): KicadIm
     return { x: p.x, y: p.y, rot: f.placement.rot, side: f.placement.side };
   }
 
-  // ----- schematic import -----
-  function importSchematics() {
-    const files = input.schematics!;
+  // ----- board-only import: generate symbols and connect pads with labels -----
+  function importBoardOnlyComponents() {
+    const byNet = new Map<string, Terminal[]>();
+    pcb!.footprints.forEach((f, i) => {
+      const ids = [...new Set(f.footprint.pads.map((p) => p.id))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+      const sig = JSON.stringify(f.footprint);
+      const prefix = (f.ref.match(/^[A-Za-z]+/)?.[0] ?? "U").toUpperCase();
+      const part = makePart(sig, () => ({ id: uidPart(), name: f.footprint.name, category: `Imported (${source})`, description: `Imported from ${source} footprint ${f.lib}`, kind: "part", refPrefix: prefix, defaultValue: f.value, keywords: [source.toLowerCase()], symbol: icSymbol(ids.slice(0, Math.ceil(ids.length / 2)).map((x) => [x, x]), ids.slice(Math.ceil(ids.length / 2)).map((x) => [x, x]), ""), footprint: f.footprint }));
+      const c = addComponent(doc, part.id, { x: (i % 6) * 180, y: Math.floor(i / 6) * 160 }, { ref: f.ref || undefined, value: f.value, pcb: pcbPlacement(f.ref) });
+      for (const [pad, net] of f.nets) {
+        if (!byNet.has(net)) byNet.set(net, []);
+        if (!byNet.get(net)!.some((t) => t.comp === c.id && t.pin === pad)) byNet.get(net)!.push({ comp: c.id, pin: pad });
+      }
+    });
+    for (const [net, terms] of byNet) {
+      if (terms.length < 2 && !/^[+]|GND|VCC|VDD/i.test(net)) continue;
+      report.nets++;
+      const auto = /^unconnected-/i.test(net);
+      if (auto) for (let i = 1; i < terms.length; i++) addWire(doc, terms[i - 1], terms[i]);
+      else {
+        const name = net.replace(/^\//, "");
+        for (const t of terms) attachNet(doc, `${componentsMap(doc).get(t.comp)!.ref}.${t.pin}`, name);
+      }
+    }
+  }
+
+  // ----- copper, outline, stackup -----
+  function importBoardCopper() {
+    const b = pcb!;
+    setBoard(doc, { thickness: b.thickness, layers: b.layers });
+    const outer = b.outline.length ? b.outline.reduce((a, c) => (area(c) > area(a) ? c : a)) : null;
+    if (outer) {
+      const shifted = outer.map(sh);
+      const mx = Math.max(...shifted.map((q) => q.x));
+      const my = Math.max(...shifted.map((q) => q.y));
+      const near = (v: number, t: number) => Math.abs(v - t) < 1e-3;
+      const isRect = shifted.length === 4 && shifted.every((p) => (near(p.x, 0) || near(p.x, mx)) && (near(p.y, 0) || near(p.y, my)));
+      if (isRect) setBoard(doc, { width: r4(mx), height: r4(my), outline: undefined });
+      else setBoardOutline(doc, shifted);
+      const holes = b.outline.filter((l) => l !== outer).map((l) => l.map(sh));
+      if (holes.length) setBoard(doc, { cutouts: holes });
+    } else {
+      const pts = [...b.footprints.map((f) => sh(f.placement)), ...b.traces.flatMap((t) => t.points.map(sh))];
+      setBoard(doc, { width: Math.ceil(Math.max(...pts.map((p) => p.x)) + 4), height: Math.ceil(Math.max(...pts.map((p) => p.y)) + 4) });
+      warnings.push("No Edge.Cuts outline found; the board size was estimated from the parts");
+    }
+    for (const t of b.traces) addTrace(doc, { layer: t.layer, width: t.width, points: t.points.map(sh) });
+    for (const v of b.vias) addVia(doc, sh(v), v.diameter, v.drill, { from: v.from, to: v.to });
+    // Zone nets: map KiCad net names to PCBian nets through the pads KiCad assigned to them.
+    const d = getDesign(doc);
+    const ourNet = netByTerminal(computeNets(d));
+    const byRef = new Map(d.components.map((c) => [c.ref, c]));
+    const netMap = new Map<string, string>();
+    for (const f of b.footprints) {
+      const c = byRef.get(f.ref);
+      if (!c) continue;
+      for (const [pad, kn] of f.nets) {
+        const n = ourNet.get(termKey({ comp: c.id, pin: pad }));
+        if (n && !netMap.has(kn)) netMap.set(kn, n);
+      }
+    }
+    let unmapped = 0;
+    for (const z of b.zones) {
+      const net = netMap.get(z.net);
+      if (!net) unmapped++;
+      addZone(doc, { ...z, net: net ?? z.net, points: z.points.map(sh) });
+    }
+    if (unmapped) warnings.push(`${unmapped} pour(s) use nets with no imported pads`);
+    const layersNow = copperLayers(getDesign(doc).board);
+    for (const k of b.keepouts) {
+      const layers = k.layers.filter((l) => layersNow.includes(l));
+      if (layers.length) addKeepout(doc, { ...k, layers, points: k.points.map(sh) });
+    }
+    // KiCad keeps design rules in the .kicad_pro file; adopt the clearance the board actually uses.
+    const used = minClearance(getDesign(doc));
+    if (used < getDesign(doc).board.clearance) {
+      const c = Math.max(0.1, Math.floor(used * 100) / 100);
+      setBoard(doc, { clearance: c, defaultTraceWidth: Math.min(0.25, Math.min(...b.traces.map((t) => t.width), 0.25)) });
+      warnings.push(`Board clearance set to ${c}mm to match the imported layout (KiCad stores rules in the .kicad_pro file)`);
+    }
+    report.traces = b.traces.length;
+    report.vias = b.vias.length;
+    report.zones = b.zones.length;
+  }
+}
+
+function area(poly: Vec[]) {
+  let a = 0;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) a += (poly[j].x + poly[i].x) * (poly[j].y - poly[i].y);
+  return Math.abs(a / 2);
+}
+
+/** Smallest gap between electrically separate copper (used to adopt imported design rules). */
+function minClearance(design: ReturnType<typeof getDesign>): number {
+  const a = analyzeCopper(design);
+  let best = Infinity;
+  for (const p of a.pairs) if (p.gap > 1e-6 && a.clusterOf.get(p.a.key) !== a.clusterOf.get(p.b.key)) best = Math.min(best, p.gap);
+  return best;
+}
+
+// ----- KiCad schematic import -----
+function importKicadSchematics(ctx: ImportCtx, files: { name: string; text: string }[]) {
+  const { doc, report, warnings, pcbByRef, makePart, uidPart, pcbPlacement, placed } = ctx;
+  {
     const parsed = files.map((f) => ({ name: f.name.replace(/^.*[\\/]/, ""), root: parseSExpr(f.text) as SExpr[] }));
     for (const p of parsed) if (head(p.root) !== "kicad_sch") throw new Error(`${p.name} is not a KiCad schematic`);
     const base = (f: string) => f.replace(/^.*[\\/]/, "");
@@ -572,103 +711,5 @@ export function importKicadProject(doc: Y.Doc, input: KicadImportInput): KicadIm
     report.nets = netCount;
     for (const ref of pcbByRef.keys()) if (!placed.has(ref) && !ref.startsWith("#")) warnings.push(`${ref} is on the board but not in the schematic; it was not imported`);
   }
-
-  // ----- board-only import: generate symbols and connect pads with labels -----
-  function importBoardOnlyComponents() {
-    const byNet = new Map<string, Terminal[]>();
-    pcb!.footprints.forEach((f, i) => {
-      const ids = [...new Set(f.footprint.pads.map((p) => p.id))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-      const sig = JSON.stringify(f.footprint);
-      const prefix = (f.ref.match(/^[A-Za-z]+/)?.[0] ?? "U").toUpperCase();
-      const part = makePart(sig, () => ({ id: uidPart(), name: f.footprint.name, category: "Imported (KiCad)", description: `Imported from KiCad footprint ${f.lib}`, kind: "part", refPrefix: prefix, defaultValue: f.value, keywords: ["kicad"], symbol: icSymbol(ids.slice(0, Math.ceil(ids.length / 2)).map((x) => [x, x]), ids.slice(Math.ceil(ids.length / 2)).map((x) => [x, x]), ""), footprint: f.footprint }));
-      const c = addComponent(doc, part.id, { x: (i % 6) * 180, y: Math.floor(i / 6) * 160 }, { ref: f.ref || undefined, value: f.value, pcb: pcbPlacement(f.ref) });
-      for (const [pad, net] of f.nets) {
-        if (!byNet.has(net)) byNet.set(net, []);
-        if (!byNet.get(net)!.some((t) => t.comp === c.id && t.pin === pad)) byNet.get(net)!.push({ comp: c.id, pin: pad });
-      }
-    });
-    for (const [net, terms] of byNet) {
-      if (terms.length < 2 && !/^[+]|GND|VCC|VDD/i.test(net)) continue;
-      report.nets++;
-      const auto = /^unconnected-/i.test(net);
-      if (auto) for (let i = 1; i < terms.length; i++) addWire(doc, terms[i - 1], terms[i]);
-      else {
-        const name = net.replace(/^\//, "");
-        for (const t of terms) attachNet(doc, `${componentsMap(doc).get(t.comp)!.ref}.${t.pin}`, name);
-      }
-    }
-  }
-
-  // ----- copper, outline, stackup -----
-  function importBoardCopper() {
-    const b = pcb!;
-    setBoard(doc, { thickness: b.thickness, layers: b.layers });
-    const outer = b.outline.length ? b.outline.reduce((a, c) => (area(c) > area(a) ? c : a)) : null;
-    if (outer) {
-      const shifted = outer.map(sh);
-      const mx = Math.max(...shifted.map((q) => q.x));
-      const my = Math.max(...shifted.map((q) => q.y));
-      const near = (v: number, t: number) => Math.abs(v - t) < 1e-3;
-      const isRect = shifted.length === 4 && shifted.every((p) => (near(p.x, 0) || near(p.x, mx)) && (near(p.y, 0) || near(p.y, my)));
-      if (isRect) setBoard(doc, { width: r4(mx), height: r4(my), outline: undefined });
-      else setBoardOutline(doc, shifted);
-      const holes = b.outline.filter((l) => l !== outer).map((l) => l.map(sh));
-      if (holes.length) setBoard(doc, { cutouts: holes });
-    } else {
-      const pts = [...b.footprints.map((f) => sh(f.placement)), ...b.traces.flatMap((t) => t.points.map(sh))];
-      setBoard(doc, { width: Math.ceil(Math.max(...pts.map((p) => p.x)) + 4), height: Math.ceil(Math.max(...pts.map((p) => p.y)) + 4) });
-      warnings.push("No Edge.Cuts outline found; the board size was estimated from the parts");
-    }
-    for (const t of b.traces) addTrace(doc, { layer: t.layer, width: t.width, points: t.points.map(sh) });
-    for (const v of b.vias) addVia(doc, sh(v), v.diameter, v.drill);
-    // Zone nets: map KiCad net names to PCBian nets through the pads KiCad assigned to them.
-    const d = getDesign(doc);
-    const ourNet = netByTerminal(computeNets(d));
-    const byRef = new Map(d.components.map((c) => [c.ref, c]));
-    const netMap = new Map<string, string>();
-    for (const f of b.footprints) {
-      const c = byRef.get(f.ref);
-      if (!c) continue;
-      for (const [pad, kn] of f.nets) {
-        const n = ourNet.get(termKey({ comp: c.id, pin: pad }));
-        if (n && !netMap.has(kn)) netMap.set(kn, n);
-      }
-    }
-    let unmapped = 0;
-    for (const z of b.zones) {
-      const net = netMap.get(z.net);
-      if (!net) unmapped++;
-      addZone(doc, { net: net ?? z.net, layer: z.layer, points: z.points.map(sh) });
-    }
-    if (unmapped) warnings.push(`${unmapped} pour(s) use nets with no imported pads`);
-    const layersNow = copperLayers(getDesign(doc).board);
-    for (const k of b.keepouts) {
-      const layers = k.layers.filter((l) => layersNow.includes(l));
-      if (layers.length) addKeepout(doc, { ...k, layers, points: k.points.map(sh) });
-    }
-    // KiCad keeps design rules in the .kicad_pro file; adopt the clearance the board actually uses.
-    const used = minClearance(getDesign(doc));
-    if (used < getDesign(doc).board.clearance) {
-      const c = Math.max(0.1, Math.floor(used * 100) / 100);
-      setBoard(doc, { clearance: c, defaultTraceWidth: Math.min(0.25, Math.min(...b.traces.map((t) => t.width), 0.25)) });
-      warnings.push(`Board clearance set to ${c}mm to match the imported layout (KiCad stores rules in the .kicad_pro file)`);
-    }
-    report.traces = b.traces.length;
-    report.vias = b.vias.length;
-    report.zones = b.zones.length;
-  }
 }
 
-function area(poly: Vec[]) {
-  let a = 0;
-  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) a += (poly[j].x + poly[i].x) * (poly[j].y - poly[i].y);
-  return Math.abs(a / 2);
-}
-
-/** Smallest gap between electrically separate copper (used to adopt imported design rules). */
-function minClearance(design: ReturnType<typeof getDesign>): number {
-  const a = analyzeCopper(design);
-  let best = Infinity;
-  for (const p of a.pairs) if (p.gap > 1e-6 && a.clusterOf.get(p.a.key) !== a.clusterOf.get(p.b.key)) best = Math.min(best, p.gap);
-  return best;
-}

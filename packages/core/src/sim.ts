@@ -4,7 +4,7 @@
 // (simulation source or regulator output) already drives the net.
 import { getPart } from "./library";
 import { computeNets, netByTerminal, termKey } from "./netlist";
-import type { ComponentData, Design } from "./types";
+import type { ComponentData, Design, SpiceModel, SpiceModelType } from "./types";
 
 const PREFIX: Record<string, number> = { p: 1e-12, n: 1e-9, u: 1e-6, "µ": 1e-6, m: 1e-3, k: 1e3, K: 1e3, M: 1e6, G: 1e9 };
 
@@ -145,6 +145,21 @@ function diodeParams(c: ComponentData): { vf: number; n: number; led: boolean } 
   return { vf: 0.7, n: 1.8, led: false };
 }
 
+/** Diode current with series resistance: solve the junction voltage so that v = vj + i·RS. */
+function diodeCurrent(v: number, is: number, nvt: number, rs: number): number {
+  if (rs <= 0) return is * (sexp(v / nvt) - 1);
+  let vj = Math.min(v, nvt * Math.log(1 + 1 / (is * rs)));
+  for (let k = 0; k < 40; k++) {
+    const e = sexp(vj / nvt);
+    const h = vj + rs * is * (e - 1) - v;
+    const dh = 1 + (rs * is * e) / nvt;
+    const step = h / dh;
+    vj -= step;
+    if (Math.abs(step) < 1e-12) break;
+  }
+  return is * (sexp(vj / nvt) - 1);
+}
+
 function buildCircuit(design: Design): Circuit | string {
   const nets = computeNets(design);
   const netOf = netByTerminal(nets);
@@ -163,6 +178,14 @@ function buildCircuit(design: Design): Circuit | string {
   const ckt: Circuit = { nodeNames, linear: [], vsrc: [], isrc: [], devices: [], notModeled: [], warnings: [], params: { opGain: 1e5 } };
   const params = ckt.params;
   const driven = new Set<number>();
+  const models = new Map(design.spiceModels.map((m) => [m.name, m]));
+  const modelFor = (c: ComponentData, type: SpiceModelType): SpiceModel | undefined => {
+    if (!c.model) return undefined;
+    const m = models.get(c.model.toUpperCase());
+    if (!m) ckt.warnings.push(`${c.ref}: SPICE model ${c.model} is not in the design's model library; using the built-in model`);
+    else if (m.type !== type) ckt.warnings.push(`${c.ref}: model ${m.name} is ${m.type}, the part needs ${type}; using the built-in model`);
+    return m && m.type === type ? m : undefined;
+  };
 
   for (const c of design.components) {
     const part = getPart(c.partId);
@@ -179,9 +202,12 @@ function buildCircuit(design: Design): Circuit | string {
     else if (id.startsWith("inductor")) ckt.linear.push({ kind: "L", ref: c.ref, label, a: pn("1"), b: pn("2"), value: parseValue(c.value) ?? 1e-5 });
     else if (id.startsWith("capacitor")) ckt.linear.push({ kind: "C", ref: c.ref, label, a: pn("1"), b: pn("2"), value: parseValue(c.value) ?? 1e-7 });
     else if (id.startsWith("led") || id.startsWith("diode") || id.startsWith("schottky")) {
+      const model = modelFor(c, "D");
       const { vf, n, led } = diodeParams(c);
-      const nvt = n * VT;
-      const is = 0.01 / Math.exp(vf / nvt);
+      const N = model?.params.N ?? (model ? 1 : n);
+      const nvt = N * VT;
+      const is = model?.params.IS ?? (model ? 1e-14 : 0.01 / Math.exp(vf / nvt));
+      const rs = model?.params.RS ?? 0;
       ckt.devices.push({
         kind: "D",
         ref: c.ref,
@@ -189,49 +215,65 @@ function buildCircuit(design: Design): Circuit | string {
         led,
         nodes: [pn("2"), pn("1")], // anode, cathode
         f: ([va, vk]) => {
-          const i = is * (sexp((va - vk) / nvt) - 1);
+          const i = diodeCurrent(va - vk, is, nvt, rs);
           return [i, -i];
         },
         report: { terminal: 0, across: [0, 1] },
       });
-    } else if (id.startsWith("npn")) {
-      const IS = 1e-14;
-      const BF = 200;
-      const BR = 2;
+    } else if (id.startsWith("npn") || id.startsWith("pnp")) {
+      const pnp = id.startsWith("pnp");
+      const P = modelFor(c, pnp ? "PNP" : "NPN")?.params ?? {};
+      const IS = P.IS ?? 1e-14;
+      const BF = P.BF ?? 200;
+      const BR = P.BR ?? 2;
+      const nf = (P.NF ?? 1) * VT;
+      const nr = (P.NR ?? 1) * VT;
+      const VAF = P.VAF ?? Infinity;
+      const pol = pnp ? -1 : 1;
       ckt.devices.push({
         kind: "Q",
         ref: c.ref,
         label,
         nodes: [pn("3"), pn("1"), pn("2")], // C, B, E
         f: ([vc, vb, ve]) => {
-          const fe = sexp((vb - ve) / VT) - 1;
-          const fc = sexp((vb - vc) / VT) - 1;
-          const ict = IS * (fe - fc);
+          // Ebers-Moll transport model with the Early effect; PNP is the NPN with all polarities flipped.
+          const fe = sexp((pol * (vb - ve)) / nf) - 1;
+          const fc = sexp((pol * (vb - vc)) / nr) - 1;
+          const early = Number.isFinite(VAF) ? Math.max(0.1, 1 + (pol * (vc - ve)) / VAF) : 1;
+          const ict = IS * (fe - fc) * early;
           const ic = ict - (IS / BR) * fc;
           const ib = (IS / BF) * fe + (IS / BR) * fc;
-          return [ic, ib, -(ic + ib)];
+          return [pol * ic, pol * ib, -pol * (ic + ib)];
         },
         report: { terminal: 0, across: [0, 2] },
       });
-    } else if (id.startsWith("nmos")) {
-      const VTH = 1.0;
-      const K = 10;
-      const LAMBDA = 0.01;
+    } else if (id.startsWith("nmos") || id.startsWith("pmos")) {
+      const pmos = id.startsWith("pmos");
+      const model = modelFor(c, pmos ? "PMOS" : "NMOS");
+      const P = model?.params ?? {};
+      const VTH = Math.abs(P.VTO ?? 1.0);
+      // KP is per square; SPICE level-1 cards give W and L, power-MOSFET (VDMOS) cards fold them into KP.
+      const K = P.KP !== undefined ? P.KP * ((P.W ?? 1) / (P.L ?? 1)) : 10;
+      const LAMBDA = P.LAMBDA ?? 0.01;
       const soft = 2 * VT;
+      const pol = pmos ? -1 : 1;
       ckt.devices.push({
         kind: "M",
         ref: c.ref,
         label,
         nodes: [pn("3"), pn("1"), pn("2")], // D, G, S
-        f: ([vd, vg, vs]) => {
-          // Symmetric level-1 model with a smooth turn-on.
+        f: ([vd0, vg0, vs0]) => {
+          // Symmetric level-1 model with a smooth turn-on; PMOS mirrors every voltage and current.
+          const vd = pol * vd0;
+          const vg = pol * vg0;
+          const vs = pol * vs0;
           const flip = vd < vs;
           const d = flip ? vs : vd;
           const s = flip ? vd : vs;
           const vov = soft * Math.log1p(sexp((vg - s - VTH) / soft));
           const vds = d - s;
           const id = vds < vov ? K * (vov * vds - (vds * vds) / 2) * (1 + LAMBDA * vds) : (K / 2) * vov * vov * (1 + LAMBDA * vds);
-          const i = flip ? -id : id;
+          const i = pol * (flip ? -id : id);
           return [i, 0, -i];
         },
         report: { terminal: 0, across: [0, 2] },
@@ -759,4 +801,52 @@ function complexSolve(G: Float64Array[], B: Float64Array[], zr: Float64Array, zi
   }
   const x = gauss(A, z);
   return x ? { re: x.slice(0, n), im: x.slice(n) } : null;
+}
+
+// ---------- sweeps ----------
+
+export interface SweepResult {
+  ok: boolean;
+  error?: string;
+  /** Swept parameter (component ref) and its values. */
+  param: string;
+  x: number[];
+  nodes: Record<string, number[]>;
+  currents: Record<string, number[]>;
+  warnings: string[];
+}
+
+/** Value string for a component with its main number replaced (keeps a source's AC/transient parts). */
+function sweptValue(value: string, partId: string, v: number): string {
+  if (partId.startsWith("sim_")) return /^\s*DC\s+\S+/i.test(value) ? value.replace(/^\s*DC\s+\S+/i, `DC ${v}`) : `DC ${v}`;
+  return String(v);
+}
+
+/** The design with one component's value replaced (for sweeps and parameter steps). */
+export function withValue(design: Design, ref: string, value: string): Design {
+  return { ...design, components: design.components.map((c) => (c.ref === ref ? { ...c, value } : c)) };
+}
+
+/** DC sweep: operating point as a component's value (a source voltage, a resistance…) goes from `from` to `to`. */
+export function sweepDC(design: Design, opts: { ref: string; from: number; to: number; points?: number }): SweepResult {
+  const c = design.components.find((x) => x.ref === opts.ref);
+  const out: SweepResult = { ok: true, param: opts.ref, x: [], nodes: {}, currents: {}, warnings: [] };
+  if (!c) return { ...out, ok: false, error: `No component ${opts.ref}` };
+  const n = Math.max(2, Math.min(500, opts.points ?? 41));
+  for (let k = 0; k < n; k++) {
+    const v = opts.from + ((opts.to - opts.from) * k) / (n - 1);
+    const r = simulateDC(withValue(design, opts.ref, sweptValue(c.value, c.partId, v)));
+    if (!r.ok) return { ...out, ok: false, error: r.error };
+    out.x.push(v);
+    for (const nd of r.nodes) (out.nodes[nd.net] ??= new Array(k).fill(NaN)).push(nd.voltage);
+    for (const e of r.elements) (out.currents[e.ref] ??= new Array(k).fill(NaN)).push(e.current);
+    for (const w of r.warnings) if (!out.warnings.includes(w)) out.warnings.push(w);
+  }
+  return out;
+}
+
+/** Parameter step: run any analysis once per value of a component (e.g. R2 = 1k, 10k, 100k). */
+export function stepParam<T>(design: Design, ref: string, values: string[], run: (d: Design) => T): { value: string; result: T }[] {
+  if (!design.components.some((c) => c.ref === ref)) throw new Error(`No component ${ref}`);
+  return values.map((value) => ({ value, result: run(withValue(design, ref, value)) }));
 }

@@ -4,13 +4,12 @@
 import * as Y from "yjs";
 import { defaultPcbPlacement } from "./geometry";
 import { getPart, icSymbol, registerParts } from "./library";
-import { ALL_COPPER, type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type ComponentData, type CopperLayer, type Design, type NetClass, type PcbPlacement, type Placement, type Sheet, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
+import { type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type CommentReply, type ComponentData, type CopperLayer, type DesignComment, type Design, type DiffPair, type LengthGroup, type NetClass, type PcbPlacement, type Placement, type Sheet, type SpiceModel, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
 
 export const DEFAULT_BOARD: BoardSettings = { width: 50, height: 40, layers: 2, thickness: 1.6, clearance: 0.2, defaultTraceWidth: 0.25 };
 export const DEFAULT_SHEET: Sheet = { id: "main", name: "Sheet 1" };
 
-/** Copper layers that exist on a board with the given settings, front to back. */
-export const copperLayers = (board: Pick<BoardSettings, "layers">): CopperLayer[] => (board.layers === 4 ? ALL_COPPER : ["top", "bottom"]);
+
 
 export const uid = (prefix = "") => prefix + Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 9);
 
@@ -24,6 +23,10 @@ export const partsMap = (doc: Y.Doc) => doc.getMap<PartDef>("parts");
 export const keepoutsMap = (doc: Y.Doc) => doc.getMap<Keepout>("keepouts");
 export const schGraphicsMap = (doc: Y.Doc) => doc.getMap<SchGraphic>("schGraphics");
 export const pcbGraphicsMap = (doc: Y.Doc) => doc.getMap<PcbGraphic>("pcbGraphics");
+export const commentsMap = (doc: Y.Doc) => doc.getMap<DesignComment>("comments");
+
+/** Shared maps that make up the design itself (what version history snapshots and restores). */
+export const DESIGN_MAPS = ["components", "wires", "traces", "vias", "zones", "parts", "keepouts", "schGraphics", "pcbGraphics", "meta"] as const;
 
 export const DEFAULT_TITLE: TitleBlock = { title: "", revision: "A", date: "", company: "", author: "" };
 
@@ -98,6 +101,10 @@ export function getDesign(doc: Y.Doc): Design {
     schGraphics: [...schGraphicsMap(doc).values()],
     pcbGraphics: [...pcbGraphicsMap(doc).values()],
     titleBlock: { ...DEFAULT_TITLE, ...((m.get("titleBlock") as Partial<TitleBlock>) ?? {}) },
+    diffPairs: (m.get("diffPairs") as DiffPair[] | undefined) ?? [],
+    lengthGroups: (m.get("lengthGroups") as LengthGroup[] | undefined) ?? [],
+    comments: [...commentsMap(doc).values()].sort((a, b) => a.createdAt - b.createdAt),
+    spiceModels: (m.get("spiceModels") as SpiceModel[] | undefined) ?? [],
     variants,
     activeVariant: v ? activeVariant : "",
   };
@@ -187,8 +194,10 @@ export function addTrace(doc: Y.Doc, t: Omit<Trace, "id">): Trace {
 
 export const deleteTrace = (doc: Y.Doc, id: string) => tracesMap(doc).delete(id);
 
-export function addVia(doc: Y.Doc, at: Vec, diameter = 0.6, drill = 0.3): Via {
-  const via = { id: uid("v"), x: at.x, y: at.y, diameter, drill };
+/** Add a via; `span` makes it blind/buried/micro (omit, or top-bottom, for a through via). */
+export function addVia(doc: Y.Doc, at: Vec, diameter = 0.6, drill = 0.3, span?: { from?: CopperLayer; to?: CopperLayer }): Via {
+  const through = !span || ((!span.from || span.from === "top") && (!span.to || span.to === "bottom"));
+  const via: Via = { id: uid("v"), x: at.x, y: at.y, diameter, drill, ...(through ? {} : { from: span!.from ?? "top", to: span!.to ?? "bottom" }) };
   viasMap(doc).set(via.id, via);
   return via;
 }
@@ -268,6 +277,79 @@ export function deleteNetClass(doc: Y.Doc, name: string) {
   meta(doc).set("netClasses", ((meta(doc).get("netClasses") as NetClass[] | undefined) ?? []).filter((c) => c.name !== name));
 }
 
+// ---------- SPICE models ----------
+
+/** Add or replace SPICE models by name. */
+export function addSpiceModels(doc: Y.Doc, models: SpiceModel[]) {
+  const names = new Set(models.map((m) => m.name));
+  meta(doc).set("spiceModels", [...((meta(doc).get("spiceModels") as SpiceModel[] | undefined) ?? []).filter((m) => !names.has(m.name)), ...models]);
+}
+export const deleteSpiceModel = (doc: Y.Doc, name: string) => meta(doc).set("spiceModels", ((meta(doc).get("spiceModels") as SpiceModel[] | undefined) ?? []).filter((m) => m.name !== name));
+
+// ---------- comments ----------
+
+export function addComment(doc: Y.Doc, c: Omit<DesignComment, "id" | "createdAt" | "replies">): DesignComment {
+  const comment: DesignComment = { ...c, id: uid("c"), createdAt: Date.now(), replies: [] };
+  commentsMap(doc).set(comment.id, comment);
+  return comment;
+}
+
+export function replyComment(doc: Y.Doc, id: string, reply: Omit<CommentReply, "id" | "at">): CommentReply {
+  const c = commentsMap(doc).get(id);
+  if (!c) throw new Error(`No comment ${id}`);
+  const r: CommentReply = { ...reply, id: uid("r"), at: Date.now() };
+  commentsMap(doc).set(id, { ...c, replies: [...c.replies, r] });
+  return r;
+}
+
+export function setCommentResolved(doc: Y.Doc, id: string, resolved: boolean) {
+  const c = commentsMap(doc).get(id);
+  if (c) commentsMap(doc).set(id, { ...c, resolved });
+}
+
+export const deleteComment = (doc: Y.Doc, id: string) => commentsMap(doc).delete(id);
+
+// ---------- differential pairs and length groups ----------
+
+export function setDiffPair(doc: Y.Doc, dp: DiffPair) {
+  const list = ((meta(doc).get("diffPairs") as DiffPair[] | undefined) ?? []).filter((p) => p.name !== dp.name && p.positive !== dp.positive && p.negative !== dp.negative);
+  meta(doc).set("diffPairs", [...list, dp]);
+}
+export const deleteDiffPair = (doc: Y.Doc, name: string) => meta(doc).set("diffPairs", ((meta(doc).get("diffPairs") as DiffPair[] | undefined) ?? []).filter((p) => p.name !== name));
+
+export function setLengthGroup(doc: Y.Doc, g: LengthGroup) {
+  meta(doc).set("lengthGroups", [...((meta(doc).get("lengthGroups") as LengthGroup[] | undefined) ?? []).filter((x) => x.name !== g.name), g]);
+}
+export const deleteLengthGroup = (doc: Y.Doc, name: string) => meta(doc).set("lengthGroups", ((meta(doc).get("lengthGroups") as LengthGroup[] | undefined) ?? []).filter((x) => x.name !== name));
+
+/** Find the pair a net belongs to and its partner net. */
+export function pairOf(design: Pick<Design, "diffPairs">, net: string | undefined): { pair: DiffPair; partner: string; positive: boolean } | undefined {
+  if (!net) return undefined;
+  for (const pair of design.diffPairs ?? []) {
+    if (pair.positive === net) return { pair, partner: pair.negative, positive: true };
+    if (pair.negative === net) return { pair, partner: pair.positive, positive: false };
+  }
+  return undefined;
+}
+
+/**
+ * Pairs suggested from net names: USB_D+/USB_D-, CLK_P/CLK_N, TX+/TX-…
+ * Returns [positive, negative, base name] triples for nets not already paired.
+ */
+export function suggestDiffPairs(netNames: string[], existing: DiffPair[] = []): [string, string, string][] {
+  const taken = new Set(existing.flatMap((p) => [p.positive, p.negative]));
+  const set = new Set(netNames);
+  const out: [string, string, string][] = [];
+  for (const n of netNames) {
+    if (taken.has(n)) continue;
+    const m = n.match(/^(.*?)(_P|_N|P|N|\+|-)$/i);
+    if (!m || !/^(_P|P|\+)$/i.test(m[2])) continue;
+    const neg = m[1] + (m[2] === "+" ? "-" : m[2].replace(/p/, "n").replace(/P/, "N"));
+    if (set.has(neg) && !taken.has(neg)) out.push([n, neg, m[1].replace(/^\//, "").replace(/[_/]$/, "") || n]);
+  }
+  return out;
+}
+
 export interface NetRules {
   className: string;
   traceWidth: number;
@@ -276,8 +358,13 @@ export interface NetRules {
   viaDrill: number;
 }
 
-export function netRules(design: Pick<Design, "board" | "netClasses">, net: string | undefined): NetRules {
+export function netRules(design: Pick<Design, "board" | "netClasses"> & Partial<Pick<Design, "diffPairs">>, net: string | undefined): NetRules {
   const nc = net ? design.netClasses.find((c) => c.nets.includes(net)) : undefined;
+  const dp = pairOf({ diffPairs: design.diffPairs ?? [] }, net);
+  if (dp) {
+    const base = nc ? { clearance: nc.clearance, viaDiameter: nc.viaDiameter, viaDrill: nc.viaDrill } : { clearance: design.board.clearance, viaDiameter: 0.6, viaDrill: 0.3 };
+    return { className: `Pair ${dp.pair.name}`, traceWidth: dp.pair.width, ...base };
+  }
   if (nc) return { className: nc.name, traceWidth: nc.traceWidth, clearance: nc.clearance, viaDiameter: nc.viaDiameter, viaDrill: nc.viaDrill };
   return { className: "Default", traceWidth: design.board.defaultTraceWidth, clearance: design.board.clearance, viaDiameter: 0.6, viaDrill: 0.3 };
 }

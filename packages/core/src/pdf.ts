@@ -7,7 +7,65 @@ import type { Design, Shape, Vec } from "./types";
 
 type RGB = [number, number, number];
 
-class PdfPage {
+/** Drawing surface shared by the PDF and SVG writers (y down, units = points). */
+export interface DrawPage {
+  readonly w: number;
+  readonly h: number;
+  stroke(rgb: RGB, width: number): this;
+  fill(rgb: RGB): this;
+  polyline(pts: Vec[], close?: boolean, fill?: boolean): this;
+  rect(x: number, y: number, w: number, h: number, fill?: boolean): this;
+  circle(c: Vec, r: number, fill?: boolean): this;
+  text(x: number, y: number, size: number, str: string, anchor?: "start" | "middle" | "end", rgb?: RGB): this;
+}
+
+/** SVG page with the same API as the PDF page. */
+export class SvgPage implements DrawPage {
+  els: string[] = [];
+  private strokeColor = "#000";
+  private strokeW = 1;
+  private fillColor = "#000";
+  constructor(
+    readonly w: number,
+    readonly h: number,
+  ) {}
+  private n = (v: number) => (Math.round(v * 100) / 100).toString();
+  private col = (rgb: RGB) => `#${rgb.map((c) => Math.round(Math.max(0, Math.min(1, c)) * 255).toString(16).padStart(2, "0")).join("")}`;
+  private paint = (fill: boolean) => `fill="${fill ? this.fillColor : "none"}" stroke="${this.strokeColor}" stroke-width="${this.n(this.strokeW)}" stroke-linecap="round" stroke-linejoin="round"`;
+  stroke(rgb: RGB, width: number) {
+    this.strokeColor = this.col(rgb);
+    this.strokeW = width;
+    return this;
+  }
+  fill(rgb: RGB) {
+    this.fillColor = this.col(rgb);
+    return this;
+  }
+  polyline(pts: Vec[], close = false, fill = false) {
+    if (pts.length < 2) return this;
+    const d = pts.map((p) => `${this.n(p.x)},${this.n(p.y)}`).join(" ");
+    this.els.push(`<${close ? "polygon" : "polyline"} points="${d}" ${this.paint(fill && close)}/>`);
+    return this;
+  }
+  rect(x: number, y: number, w: number, h: number, fill = false) {
+    this.els.push(`<rect x="${this.n(x)}" y="${this.n(y)}" width="${this.n(w)}" height="${this.n(h)}" ${this.paint(fill)}/>`);
+    return this;
+  }
+  circle(c: Vec, r: number, fill = false) {
+    this.els.push(`<circle cx="${this.n(c.x)}" cy="${this.n(c.y)}" r="${this.n(r)}" ${this.paint(fill)}/>`);
+    return this;
+  }
+  text(x: number, y: number, size: number, str: string, anchor: "start" | "middle" | "end" = "start", rgb: RGB = [0, 0, 0]) {
+    const esc = str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    this.els.push(`<text x="${this.n(x)}" y="${this.n(y)}" font-size="${this.n(size)}" text-anchor="${anchor}" fill="${this.col(rgb)}">${esc}</text>`);
+    return this;
+  }
+  toString() {
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${this.w}pt" height="${this.h}pt" viewBox="0 0 ${this.w} ${this.h}" font-family="Helvetica, Arial, sans-serif">\n<rect width="100%" height="100%" fill="#ffffff"/>\n${this.els.join("\n")}\n</svg>\n`;
+  }
+}
+
+class PdfPage implements DrawPage {
   ops: string[] = [];
   constructor(
     readonly w: number,
@@ -99,7 +157,7 @@ export class PdfDocument {
 
 // ---------- shared drawing helpers ----------
 
-function drawShape(page: PdfPage, s: Shape, map: (p: Vec) => Vec, scale: number, rgb: RGB) {
+function drawShape(page: DrawPage, s: Shape, map: (p: Vec) => Vec, scale: number, rgb: RGB) {
   page.stroke(rgb, Math.max(0.4, 1.2 * scale));
   if (s.kind === "line") page.polyline(s.points.map(map));
   else if (s.kind === "polygon") page.fill(rgb).polyline(s.points.map(map), true, Boolean(s.fill));
@@ -111,7 +169,7 @@ function drawShape(page: PdfPage, s: Shape, map: (p: Vec) => Vec, scale: number,
   }
 }
 
-function titleBlock(page: PdfPage, design: Design, sheetLabel: string) {
+function titleBlock(page: DrawPage, design: Design, sheetLabel: string) {
   const tb = design.titleBlock;
   const w = 270;
   const h = 62;
@@ -132,9 +190,22 @@ function titleBlock(page: PdfPage, design: Design, sheetLabel: string) {
 /** One A4-landscape page per sheet with symbols, wires, labels, graphics and a title block. */
 export function schematicPdf(design: Design): Uint8Array {
   const pdf = new PdfDocument();
+  for (const sheet of design.sheets) drawSchematicSheet(pdf.addPage(), design, sheet);
+  return pdf.toBytes();
+}
+
+/** One SVG per schematic sheet (A4 landscape, same drawing as the PDF). */
+export function schematicSvgs(design: Design): { sheet: string; svg: string }[] {
+  return design.sheets.map((sheet) => {
+    const page = new SvgPage(842, 595);
+    drawSchematicSheet(page, design, sheet);
+    return { sheet: sheet.name, svg: page.toString() };
+  });
+}
+
+function drawSchematicSheet(page: DrawPage, design: Design, sheet: Design["sheets"][number]) {
   const byId = new Map(design.components.map((c) => [c.id, c]));
-  for (const sheet of design.sheets) {
-    const page = pdf.addPage();
+  {
     const comps = design.components.filter((c) => sheetOf(design, c) === sheet.id);
     const pinPos = (compId: string, pin: string) => {
       const c = byId.get(compId);
@@ -223,7 +294,6 @@ export function schematicPdf(design: Design): Uint8Array {
     }
     titleBlock(page, design, sheet.name);
   }
-  return pdf.toBytes();
 }
 
 // ---------- assembly drawing ----------

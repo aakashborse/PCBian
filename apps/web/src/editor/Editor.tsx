@@ -4,6 +4,8 @@ import { api } from "../lib/api";
 import { navigate } from "../lib/router";
 import { useDesign, useProjectConnection } from "../lib/useProject";
 import { useUser } from "../lib/user";
+import { HistoryPanel } from "./History";
+import { ReviewPanel } from "./Review";
 import { initials, UserBadge } from "../pages/UserBadge";
 import { Board3D } from "./Board3D";
 import { Checks } from "./Checks";
@@ -17,7 +19,7 @@ import { usePresence } from "./presence";
 import { SchematicCanvas } from "./SchematicCanvas";
 import { Simulation } from "./Simulation";
 
-type RightTab = "copilot" | "inspect" | "checks" | "sim";
+type RightTab = "copilot" | "inspect" | "checks" | "sim" | "review" | "history";
 
 export function Editor({ projectId }: { projectId: string }) {
   const { conn, synced, online } = useProjectConnection(projectId);
@@ -61,7 +63,7 @@ export function Editor({ projectId }: { projectId: string }) {
     (s: Selection) => {
       setSelection(s);
       conn.provider.awareness.setLocalStateField("sel", s?.kind === "component" ? s.id : null);
-      if (s) setTab((t) => (t === "checks" ? t : "inspect"));
+      if (s) setTab((t) => (s.kind === "comment" ? "review" : t === "checks" ? t : "inspect"));
     },
     [conn],
   );
@@ -77,7 +79,8 @@ export function Editor({ projectId }: { projectId: string }) {
       (selection.kind === "zone" && design.zones.some((z) => z.id === selection.id)) ||
       (selection.kind === "keepout" && design.keepouts.some((k) => k.id === selection.id)) ||
       (selection.kind === "dimension" && design.pcbGraphics.some((g) => g.id === selection.id)) ||
-      (selection.kind === "graphic" && design.schGraphics.some((g) => g.id === selection.id));
+      (selection.kind === "graphic" && design.schGraphics.some((g) => g.id === selection.id)) ||
+      (selection.kind === "comment" && design.comments.some((c) => c.id === selection.id));
     if (!exists) select(null);
   }, [design, selection, select]);
 
@@ -233,10 +236,18 @@ export function Editor({ projectId }: { projectId: string }) {
             <button className={tab === "sim" ? "on" : ""} onClick={() => setTab("sim")}>
               Sim
             </button>
+            <button className={tab === "review" ? "on" : ""} onClick={() => setTab("review")} title="Review comments">
+              Review{design.comments.some((c) => !c.resolved) ? ` ${design.comments.filter((c) => !c.resolved).length}` : ""}
+            </button>
+            <button className={tab === "history" ? "on" : ""} onClick={() => setTab("history")} title="Version history">
+              History
+            </button>
           </div>
           {tab === "copilot" && <Copilot enabled={copilot} />}
           {tab === "inspect" && <Inspector />}
           {tab === "checks" && <Checks />}
+          {tab === "review" && <ReviewPanel />}
+          {tab === "history" && <HistoryPanel />}
           {tab === "sim" && <Simulation />}
         </aside>
       </div>

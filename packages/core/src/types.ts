@@ -9,9 +9,11 @@ export interface Vec {
 
 export type Rotation = 0 | 90 | 180 | 270;
 export type Side = "top" | "bottom";
-/** Copper layers from front to back. Inner layers exist only on 4-layer boards. */
-export type CopperLayer = "top" | "in1" | "in2" | "bottom";
-export const ALL_COPPER: CopperLayer[] = ["top", "in1", "in2", "bottom"];
+/** Copper layers from front to back: top, in1 … in30, bottom. A board uses the first layers-2 inner layers. */
+export type CopperLayer = "top" | "bottom" | `in${number}`;
+export const MAX_LAYERS = 32;
+/** Every possible copper layer (through-hole pads and through vias are on all of a board's layers). */
+export const ALL_COPPER: CopperLayer[] = ["top", ...Array.from({ length: MAX_LAYERS - 2 }, (_, i) => `in${i + 1}` as CopperLayer), "bottom"];
 
 /** Drawing primitives used by schematic symbols and footprint silkscreen. */
 export type Shape =
@@ -118,6 +120,17 @@ export interface ComponentData {
   noConnect?: string[];
   /** Excluded from BOM / placement (e.g. fiducials, do-not-populate). */
   dnp?: boolean;
+  /** SPICE model name (from the design's imported models) used by the simulator. */
+  model?: string;
+}
+
+export type SpiceModelType = "D" | "NPN" | "PNP" | "NMOS" | "PMOS";
+
+/** A primitive SPICE .model card (parameter names upper-case, values in SI units). */
+export interface SpiceModel {
+  name: string;
+  type: SpiceModelType;
+  params: Record<string, number>;
 }
 
 export interface Sheet {
@@ -175,8 +188,13 @@ export interface Zone {
   layer: CopperLayer;
   /** Closed outline polygon in PCB mm. */
   points: Vec[];
-  /** Higher priority zones win where zones overlap (reserved for future use). */
+  /** Higher priority zones win where zones of different nets overlap (default 0). */
   priority?: number;
+  /** Solid fill (default) or a hatched mesh (flex boards, impedance reference planes). */
+  fill?: "solid" | "hatch";
+  /** Hatch line width and gap between lines (mm). */
+  hatchWidth?: number;
+  hatchGap?: number;
   /** How same-net pads join the pour (default thermal). */
   padConnection?: "thermal" | "solid";
   thermalGap?: number;
@@ -193,6 +211,32 @@ export interface NetClass {
   viaDrill: number;
   /** Net names assigned to this class. */
   nets: string[];
+  /** Target single-ended impedance (ohms); the width is then solved from the stackup per layer. */
+  impedance?: number;
+}
+
+/** Two nets routed as a coupled pair (USB, LVDS, Ethernet…). */
+export interface DiffPair {
+  name: string;
+  positive: string;
+  negative: string;
+  /** Trace width and edge-to-edge gap in mm. */
+  width: number;
+  gap: number;
+  /** Target differential impedance (ohms), for reporting and width/gap solving. */
+  impedance?: number;
+  /** Allowed length difference between the two nets (mm). */
+  maxSkew: number;
+}
+
+/** Nets whose routed lengths must match (a DDR byte lane, a parallel bus…). */
+export interface LengthGroup {
+  name: string;
+  nets: string[];
+  /** Target length (mm); when omitted the longest net in the group sets it. */
+  target?: number;
+  /** Allowed deviation from the target (mm). */
+  tolerance: number;
 }
 
 export interface Terminal {
@@ -221,13 +265,37 @@ export interface Via {
   y: number;
   diameter: number;
   drill: number;
+  /** Layer span for blind/buried/micro vias; omitted = through (top to bottom). */
+  from?: CopperLayer;
+  to?: CopperLayer;
+}
+
+/** Dielectric between two adjacent copper layers. */
+export interface Dielectric {
+  /** mm */
+  thickness: number;
+  /** Relative permittivity (FR-4 ≈ 4.3). */
+  er: number;
+  kind: "core" | "prepreg";
+}
+
+export interface Stackup {
+  /** Copper weight per layer, top to bottom (oz; 1 oz ≈ 0.035 mm). */
+  copperOz: number[];
+  /** layers - 1 dielectrics, top to bottom. */
+  dielectrics: Dielectric[];
+  /** Soldermask thickness (mm) and permittivity, used for outer-layer impedance. */
+  maskThickness?: number;
+  maskEr?: number;
 }
 
 export interface BoardSettings {
   width: number;
   height: number;
-  /** Copper layer count: 2 (top/bottom) or 4 (top/in1/in2/bottom). */
-  layers: 2 | 4;
+  /** Copper layer count: an even number from 2 to 32. */
+  layers: number;
+  /** Layer stackup; derived from thickness when absent. */
+  stackup?: Stackup;
   /** Board thickness in mm (for 3D and fab notes). */
   thickness: number;
   /** Minimum copper-to-copper clearance used by DRC (mm). */
@@ -241,6 +309,31 @@ export interface BoardSettings {
   cutouts?: Vec[][];
   /** Add teardrops where traces meet pads and vias. */
   teardrops?: boolean;
+}
+
+export interface CommentReply {
+  id: string;
+  author: string;
+  color?: string;
+  text: string;
+  at: number;
+}
+
+/** A review comment pinned to a spot on the schematic or the board. */
+export interface DesignComment {
+  id: string;
+  view: "schematic" | "pcb";
+  /** Schematic sheet (schematic comments). */
+  sheet?: string;
+  pos: Vec;
+  /** Component the comment is about, if it was dropped on one. */
+  ref?: string;
+  author: string;
+  color?: string;
+  text: string;
+  createdAt: number;
+  resolved?: boolean;
+  replies: CommentReply[];
 }
 
 /** Plain-object snapshot of a project's design document. */
@@ -258,6 +351,10 @@ export interface Design {
   schGraphics: SchGraphic[];
   pcbGraphics: PcbGraphic[];
   titleBlock: TitleBlock;
+  diffPairs: DiffPair[];
+  lengthGroups: LengthGroup[];
+  comments: DesignComment[];
+  spiceModels: SpiceModel[];
   variants: Variant[];
   /** Active variant name; "" means the base design. */
   activeVariant: string;

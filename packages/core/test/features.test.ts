@@ -54,7 +54,7 @@ function board(layers: 2 | 4 = 2) {
 const route = (doc: Y.Doc, opts = {}) => {
   const r = autoRoute(getDesign(doc), opts);
   for (const t of r.traces) addTrace(doc, t);
-  for (const v of r.vias) addVia(doc, v, v.diameter, v.drill);
+  for (const v of r.vias) addVia(doc, v, v.diameter, v.drill, v);
   return r;
 };
 

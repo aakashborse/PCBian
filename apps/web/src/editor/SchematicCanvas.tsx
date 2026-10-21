@@ -1,4 +1,5 @@
 import {
+  addComment,
   addComponent,
   addSchGraphic,
   addSheet,
@@ -33,6 +34,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
 import { publishCursor, type PresenceState } from "./presence";
 import { SymbolBody } from "./render";
+import { askCopilotAbout, CommentPins } from "./Review";
+import { useUser } from "../lib/user";
 import { beginPan, dedupe, useViewport } from "./viewport";
 
 const GRID = 10;
@@ -87,7 +90,8 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   const [wiring, setWiring] = useState<Wiring | null>(null);
   const [ncTool, setNcTool] = useState(false);
   /** Free drawing tools: bus polyline or text note. */
-  const [drawTool, setDrawTool] = useState<"bus" | "text" | null>(null);
+  const [drawTool, setDrawTool] = useState<"bus" | "text" | "comment" | null>(null);
+  const user = useUser();
   const [busDraft, setBusDraft] = useState<Vec[] | null>(null);
   const [sheet, setSheet] = useState(design.sheets[0].id);
   const sheetIds = design.sheets.map((s) => s.id);
@@ -230,6 +234,16 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
       if (drawTool === "text") {
         const text = prompt("Note text");
         if (text?.trim()) addSchGraphic(doc, { sheet, kind: "text", points: [p], text: text.trim(), size: 10 });
+        setDrawTool(null);
+      } else if (drawTool === "comment") {
+        const text = prompt("Comment (mention @copilot to ask the AI)");
+        if (text?.trim()) {
+          // Attach it to the nearest part on this sheet, if one is close.
+          const near = onSheet.filter((c) => getPart(c.partId)?.kind === "part").map((c) => ({ c, d: Math.hypot(c.sch.x - p.x, c.sch.y - p.y) })).sort((a, b) => a.d - b.d)[0];
+          const c = addComment(doc, { view: "schematic", sheet, pos: p, ref: near && near.d < 60 ? near.c.ref : undefined, author: user.name, color: user.color, text: text.trim() });
+          ed.select({ kind: "comment", id: c.id });
+          if (/@copilot\b/i.test(text)) askCopilotAbout(ed.projectId, c, text.trim(), user.name).then(() => ed.toast("Copilot is on it"), (err) => ed.toast((err as Error).message));
+        }
         setDrawTool(null);
       } else if (e.detail >= 2 && busDraft) finishBus();
       else {
@@ -455,6 +469,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
             </g>
           )}
 
+          <CommentPins view="schematic" sheet={sheet} r={11 / view.k} />
           {presence.map((p) =>
             p.cursor?.view === "schematic" ? (
               <g key={p.clientId} transform={`translate(${p.cursor.x},${p.cursor.y}) scale(${1 / view.k})`} pointerEvents="none">
@@ -504,6 +519,9 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         </select>
         <button className={drawTool === "bus" ? "active" : ""} onClick={() => (setDrawTool(drawTool === "bus" ? null : "bus"), setBusDraft(null), setPlacing(null))} title="Draw a bus">
           Bus
+        </button>
+        <button className={drawTool === "comment" ? "active" : ""} onClick={() => (setDrawTool(drawTool === "comment" ? null : "comment"), setPlacing(null))} title="Pin a review comment">
+          Comment
         </button>
         <button className={drawTool === "text" ? "active" : ""} onClick={() => (setDrawTool(drawTool === "text" ? null : "text"), setPlacing(null))} title="Add a text note">
           Text

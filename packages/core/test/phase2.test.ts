@@ -141,7 +141,7 @@ describe("board outlines and keepouts", () => {
     const r = autoRoute(getDesign(doc));
     expect(r.failed).toEqual([]);
     for (const t of r.traces) addTrace(doc, t);
-    for (const v of r.vias) addVia(doc, v, v.diameter, v.drill);
+    for (const v of r.vias) addVia(doc, v, v.diameter, v.drill, v);
     expect(runDrc(getDesign(doc)).filter((i) => i.code === "keepout")).toEqual([]);
     addTrace(doc, { layer: "top", width: 0.25, points: [{ x: mx - 2, y: 5 }, { x: mx + 2, y: 5 }] });
     expect(runDrc(getDesign(doc)).some((i) => i.code === "keepout")).toBe(true);

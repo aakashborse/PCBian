@@ -11,6 +11,13 @@ import {
   updateComponent,
   busMembers,
   copperLayers,
+  modelTypesForPart,
+  layerLabel,
+  traceImpedance,
+  viaKind,
+  viaLayers,
+  viasMap,
+  widthForImpedance,
   deleteKeepout,
   deleteNetClass,
   deletePcbGraphic,
@@ -32,8 +39,10 @@ import {
 import { useEffect, useState } from "react";
 import { useEditor } from "./context";
 import { PartEditor } from "./PartEditor";
+import { StackupCard } from "./Stackup";
+import { DiffPairsCard, LengthGroupsCard, TraceLengthTuner } from "./Routing";
 
-function NumField({ label, value, onChange, step = 0.05, min = 0 }: { label: string; value: number; onChange: (v: number) => void; step?: number; min?: number }) {
+export function NumField({ label, value, onChange, step = 0.05, min = 0 }: { label: string; value: number; onChange: (v: number) => void; step?: number; min?: number }) {
   const shown = String(Math.round(value * 1000) / 1000);
   const [v, setV] = useState(shown);
   useEffect(() => setV(shown), [shown]);
@@ -137,6 +146,21 @@ export function Inspector() {
                   {s.name}
                 </option>
               ))}
+            </select>
+          </div>
+        )}
+        {modelTypesForPart(c.partId).length > 0 && (
+          <div className="field">
+            <label>SPICE model</label>
+            <select value={c.model ?? ""} onChange={(e) => updateComponent(doc, c.id, { model: e.target.value || undefined })}>
+              <option value="">Built-in</option>
+              {design.spiceModels
+                .filter((m) => modelTypesForPart(c.partId).includes(m.type))
+                .map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {m.name}
+                  </option>
+                ))}
             </select>
           </div>
         )}
@@ -302,13 +326,21 @@ export function Inspector() {
           <span>Length</span>
           <span>{len.toFixed(2)} mm</span>
         </div>
+        <TraceLengthTuner traceId={t.id} />
         <NumField label="Width (mm)" value={t.width} onChange={(width) => tracesMap(doc).set(t.id, { ...t, width })} min={0.05} />
         <div className="field">
           <label>Layer</label>
-          <select value={t.layer} onChange={(e) => tracesMap(doc).set(t.id, { ...t, layer: e.target.value as "top" | "bottom" })}>
-            <option value="top">Top</option>
-            <option value="bottom">Bottom</option>
+          <select value={t.layer} onChange={(e) => tracesMap(doc).set(t.id, { ...t, layer: e.target.value as CopperLayer })}>
+            {copperLayers(design.board).map((l) => (
+              <option key={l} value={l}>
+                {layerLabel(l)}
+              </option>
+            ))}
           </select>
+        </div>
+        <div className="kv small" style={{ marginBottom: 12 }}>
+          <span>Impedance</span>
+          <span>{copperLayers(design.board).includes(t.layer) ? `${traceImpedance(design.board, t.layer, t.width).toFixed(1)} Ω` : "—"}</span>
         </div>
         <button className="danger" onClick={() => (deleteTrace(doc, t.id), select(null))}>
           Delete trace
@@ -357,6 +389,20 @@ export function Inspector() {
           <input type="checkbox" checked={z.removeIslands ?? true} onChange={(e) => zonesMap(doc).set(z.id, { ...z, removeIslands: e.target.checked })} />
           Remove isolated islands
         </label>
+        <div className="field">
+          <label>Fill</label>
+          <select value={z.fill ?? "solid"} onChange={(e) => zonesMap(doc).set(z.id, { ...z, fill: e.target.value as "solid" | "hatch" })}>
+            <option value="solid">Solid</option>
+            <option value="hatch">Hatched</option>
+          </select>
+        </div>
+        {z.fill === "hatch" && (
+          <>
+            <NumField label="Hatch width" value={z.hatchWidth ?? 0.25} onChange={(hatchWidth) => zonesMap(doc).set(z.id, { ...z, hatchWidth })} min={0.1} />
+            <NumField label="Hatch gap" value={z.hatchGap ?? 1} onChange={(hatchGap) => zonesMap(doc).set(z.id, { ...z, hatchGap })} min={0.2} />
+          </>
+        )}
+        <NumField label="Priority" value={z.priority ?? 0} step={1} onChange={(priority) => zonesMap(doc).set(z.id, { ...z, priority: Math.round(priority) })} />
         <p className="muted small">Same-net pads inside the outline connect through the pour; other nets get clearance automatically. {z.points.length} outline points.</p>
         <button className="danger" onClick={() => (deleteZone(doc, z.id), select(null))}>
           Delete pour
@@ -366,9 +412,45 @@ export function Inspector() {
   }
 
   if (selection?.kind === "via") {
+    const v = design.vias.find((x) => x.id === selection.id);
+    if (!v) return <Empty />;
+    const all = copperLayers(design.board);
+    const span = viaLayers(design.board, v);
+    const setSpan = (from: CopperLayer, to: CopperLayer) => {
+      const [a, b] = [all.indexOf(from), all.indexOf(to)].sort((x, y) => x - y);
+      const through = a === 0 && b === all.length - 1;
+      const { from: _f, to: _t, ...rest } = v;
+      viasMap(doc).set(v.id, through ? rest : { ...rest, from: all[a], to: all[b] });
+    };
     return (
       <div className="panel-body">
         <h4>Via</h4>
+        <div className="kv" style={{ marginBottom: 10 }}>
+          <span>Type</span>
+          <span>{viaKind(design.board, v)}</span>
+        </div>
+        <div className="field">
+          <label>From</label>
+          <select value={span[0]} onChange={(e) => setSpan(e.target.value as CopperLayer, span[span.length - 1])}>
+            {all.map((l) => (
+              <option key={l} value={l}>
+                {layerLabel(l)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>To</label>
+          <select value={span[span.length - 1]} onChange={(e) => setSpan(span[0], e.target.value as CopperLayer)}>
+            {all.map((l) => (
+              <option key={l} value={l}>
+                {layerLabel(l)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <NumField label="Diameter" value={v.diameter} onChange={(diameter) => viasMap(doc).set(v.id, { ...v, diameter })} min={0.15} />
+        <NumField label="Drill" value={v.drill} onChange={(drill) => viasMap(doc).set(v.id, { ...v, drill: Math.min(drill, v.diameter - 0.05) })} min={0.05} />
         <button className="danger" onClick={() => (deleteVia(doc, selection.id), select(null))}>
           Delete via
         </button>
@@ -391,12 +473,15 @@ function Empty() {
       <NumField label="Height (mm)" value={b.height} onChange={(height) => set({ height })} step={1} min={5} />
       <div className="field">
         <label>Copper layers</label>
-        <select value={b.layers} onChange={(e) => set({ layers: Number(e.target.value) as 2 | 4 })}>
-          <option value={2}>2 (top, bottom)</option>
-          <option value={4}>4 (top, in1, in2, bottom)</option>
+        <select value={b.layers} onChange={(e) => set({ layers: Number(e.target.value), stackup: undefined })}>
+          {Array.from({ length: 16 }, (_, i) => 2 * (i + 1)).map((n) => (
+            <option key={n} value={n}>
+              {n === 2 ? "2 (top, bottom)" : n === 4 ? "4 (top, in1, in2, bottom)" : `${n} layers`}
+            </option>
+          ))}
         </select>
       </div>
-      <NumField label="Thickness" value={b.thickness} onChange={(thickness) => set({ thickness })} step={0.1} min={0.2} />
+      <NumField label="Thickness" value={b.thickness} onChange={(thickness) => set({ thickness, stackup: undefined })} step={0.1} min={0.2} />
       <NumField label="Clearance" value={b.clearance} onChange={(clearance) => set({ clearance })} min={0.05} />
       {!b.outline && <NumField label="Corner radius" value={b.cornerRadius ?? 0} onChange={(cornerRadius) => set({ cornerRadius })} step={0.5} min={0} />}
       {b.outline && <p className="muted small">Custom outline ({b.outline.length} points). Use PCB toolbar → Outline… to redraw or reset it.</p>}
@@ -413,7 +498,10 @@ function Empty() {
         Teardrops at pads and vias
       </label>
       <NumField label="Trace width" value={b.defaultTraceWidth} onChange={(defaultTraceWidth) => set({ defaultTraceWidth })} min={0.05} />
+      <StackupCard />
       <NetClasses />
+      <DiffPairsCard />
+      <LengthGroupsCard />
       <Variants />
       <TitleBlockCard />
       <div className="card" style={{ marginTop: 12 }}>
@@ -463,6 +551,16 @@ function NetClasses() {
           </div>
           <NumField label="Trace (mm)" value={nc.traceWidth} onChange={(traceWidth) => save({ ...nc, traceWidth })} min={0.05} />
           <NumField label="Clearance" value={nc.clearance} onChange={(clearance) => save({ ...nc, clearance })} min={0.05} />
+          <NumField
+            label="Impedance Ω"
+            value={nc.impedance ?? 0}
+            step={1}
+            onChange={(z) => {
+              // Solving the width from the stackup keeps the class on target for the outer layers.
+              const w = z > 0 ? widthForImpedance(design.board, "top", z) : null;
+              save({ ...nc, impedance: z > 0 ? z : undefined, ...(w ? { traceWidth: Math.round(w * 1000) / 1000 } : {}) });
+            }}
+          />
           <NumField label="Via Ø / drill" value={nc.viaDiameter} onChange={(viaDiameter) => save({ ...nc, viaDiameter, viaDrill: Math.min(nc.viaDrill, viaDiameter - 0.2) })} min={0.3} />
           <div className="field">
             <label>Nets</label>

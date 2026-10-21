@@ -1,5 +1,6 @@
 // Copper connectivity, ratsnest, copper pour (zone) fills and design-rule checks.
-import { boardOutline, copperLayers, netRules } from "./doc";
+import { boardOutline, netRules, pairOf } from "./doc";
+import { copperLayers, diffImpedance, traceImpedance, viaKind, viaLayers } from "./stackup";
 import {
   courtyardRect,
   dist,
@@ -22,17 +23,20 @@ import { ALL_COPPER, type CopperLayer, type Design, type Issue, type Net, type P
 export type CopperItem =
   | { kind: "pad"; key: string; pad: WorldPad; net?: string }
   | { kind: "trace"; key: string; trace: Trace }
-  | { kind: "via"; key: string; via: Via };
+  | { kind: "via"; key: string; via: Via; layers: CopperLayer[] };
 
 const segs = (t: Trace): [Vec, Vec][] => t.points.slice(1).map((p, i) => [t.points[i], p]);
 
 export function itemOnLayer(item: CopperItem, layer: CopperLayer): boolean {
   if (item.kind === "pad") return item.pad.layers.includes(layer);
   if (item.kind === "trace") return item.trace.layer === layer;
-  return true;
+  return item.layers.includes(layer);
 }
 
 /** Distance between copper edges of two items on a shared layer (<= 0 means touching). */
+export function copperGap(a: CopperItem, b: CopperItem): number {
+  return gap(a, b);
+}
 function gap(a: CopperItem, b: CopperItem): number {
   if (a.kind === "trace" && b.kind !== "trace") return gap(b, a);
   if (a.kind === "via" && b.kind === "pad") return gap(b, a);
@@ -60,7 +64,7 @@ function gap(a: CopperItem, b: CopperItem): number {
   return Infinity;
 }
 
-const sharedLayers = (a: CopperItem, b: CopperItem): CopperLayer[] => ALL_COPPER.filter((l) => itemOnLayer(a, l) && itemOnLayer(b, l));
+export const sharedLayers = (a: CopperItem, b: CopperItem): CopperLayer[] => ALL_COPPER.filter((l) => itemOnLayer(a, l) && itemOnLayer(b, l));
 
 export interface CopperAnalysis {
   nets: Net[];
@@ -84,7 +88,7 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
     padsOf(c).forEach((pad, i) => items.push({ kind: "pad", key: `pad:${c.id}:${i}`, pad, net: netOf.get(termKey({ comp: c.id, pin: pad.id })) }));
   }
   for (const t of design.traces) if (t.points.length >= 2) items.push({ kind: "trace", key: `trace:${t.id}`, trace: t });
-  for (const v of design.vias) items.push({ kind: "via", key: `via:${v.id}`, via: v });
+  for (const v of design.vias) items.push({ kind: "via", key: `via:${v.id}`, via: v, layers: viaLayers(design.board, v) });
 
   const uf = new UnionFind();
   items.forEach((it) => uf.find(it.key));
@@ -244,7 +248,12 @@ export function runDrc(design: Design): Issue[] {
   // Clearance between copper that is not electrically connected (net-class aware).
   for (const { a, b, gap: g } of analysis.pairs) {
     if (g <= 1e-6 || analysis.clusterOf.get(a.key) === analysis.clusterOf.get(b.key)) continue;
-    const required = Math.max(netRules(design, analysis.netOfItem(a)).clearance, netRules(design, analysis.netOfItem(b)).clearance);
+    const na = analysis.netOfItem(a);
+    const nb = analysis.netOfItem(b);
+    let required = Math.max(netRules(design, na).clearance, netRules(design, nb).clearance);
+    // The two traces of a differential pair run at the pair gap, which may be tighter than the clearance rule.
+    const dp = pairOf(design, na);
+    if (dp && dp.partner === nb && a.kind === "trace" && b.kind === "trace") required = Math.min(required, dp.pair.gap);
     if (g < required - 1e-9) {
       issues.push({
         severity: "error",
@@ -328,14 +337,78 @@ export function runDrc(design: Design): Issue[] {
     if (insideBoard(it.pad.world) && d < EDGE_CLEAR - 1e-9) issues.push({ severity: "warning", code: "edge_clearance", message: `${it.pad.ref} pad ${it.pad.id} is ${d.toFixed(2)}mm from the board edge`, at: it.pad.world, refs: [it.pad.ref] });
   }
   issues.push(...silkAndMaskChecks(design, analysis));
+  issues.push(...lengthIssues(design, analysis));
   for (const v of design.vias) {
-    if (v.drill < 0.2) issues.push({ severity: "warning", code: "via_drill", message: `Via drill ${v.drill}mm is below the 0.2mm manufacturing minimum`, at: v });
+    // Laser-drilled microvias go down to 0.1mm; mechanical drills stop at about 0.2mm.
+    const kind = viaKind(design.board, v);
+    const minDrill = kind === "micro" ? 0.1 : 0.2;
+    if (v.drill < minDrill) issues.push({ severity: "warning", code: "via_drill", message: `Via drill ${v.drill}mm is below the ${minDrill}mm minimum for ${kind} vias`, at: v });
+    for (const l of [v.from, v.to]) if (l && !layers.includes(l)) issues.push({ severity: "error", code: "layer", message: `Via spans ${l}, which this ${design.board.layers}-layer board does not have`, at: v });
+    if (kind === "micro" && v.drill > 0.15) issues.push({ severity: "warning", code: "via_drill", message: `Microvia drill ${v.drill}mm is larger than the usual 0.1-0.15mm laser drill`, at: v });
     if (v.diameter - v.drill < 0.2) issues.push({ severity: "warning", code: "annular_ring", message: `Via annular ring ${((v.diameter - v.drill) / 2).toFixed(2)}mm is below 0.1mm`, at: v });
   }
   const netNames = new Set(analysis.nets.map((n) => n.name));
   for (const z of design.zones) {
     if (!layers.includes(z.layer)) issues.push({ severity: "error", code: "layer", message: `Zone ${z.net} is on ${z.layer} but the board has ${design.board.layers} layers`, at: z.points[0] });
     if (!netNames.has(z.net)) issues.push({ severity: "warning", code: "zone_net", message: `Zone on ${z.layer} uses net ${z.net}, which does not exist in the schematic`, at: z.points[0] });
+  }
+  return issues;
+}
+
+// ---------- lengths, skew and impedance ----------
+
+export const traceLength = (t: Pick<Trace, "points">) => t.points.slice(1).reduce((s, p, i) => s + Math.hypot(p.x - t.points[i].x, p.y - t.points[i].y), 0);
+
+/** Routed trace length per net (mm). */
+export function netLengths(design: Design, analysis = analyzeCopper(design)): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const it of analysis.items) {
+    if (it.kind !== "trace") continue;
+    const net = analysis.netOfItem(it);
+    if (net) out.set(net, (out.get(net) ?? 0) + traceLength(it.trace));
+  }
+  return out;
+}
+
+/** Length-group, differential-pair skew and impedance checks. */
+export function lengthIssues(design: Design, analysis = analyzeCopper(design)): Issue[] {
+  const issues: Issue[] = [];
+  const len = netLengths(design, analysis);
+  const rats = ratsnest(design, analysis);
+  const unrouted = new Set(rats.map((r) => r.net));
+  for (const g of design.lengthGroups) {
+    const nets = g.nets.filter((n) => len.has(n) && !unrouted.has(n));
+    if (nets.length < (g.target ? 1 : 2)) continue;
+    const target = g.target ?? Math.max(...nets.map((n) => len.get(n)!));
+    for (const n of nets) {
+      const d = len.get(n)! - target;
+      if (Math.abs(d) > g.tolerance + 1e-6)
+        issues.push({ severity: "warning", code: "length", message: `${n} is ${len.get(n)!.toFixed(2)}mm, ${d > 0 ? "over" : "under"} the ${g.name} target ${target.toFixed(2)}mm by ${Math.abs(d).toFixed(2)}mm (±${g.tolerance}mm)` });
+    }
+  }
+  for (const p of design.diffPairs) {
+    const a = len.get(p.positive);
+    const b = len.get(p.negative);
+    if (a === undefined || b === undefined || unrouted.has(p.positive) || unrouted.has(p.negative)) continue;
+    if (Math.abs(a - b) > p.maxSkew + 1e-6) issues.push({ severity: "warning", code: "skew", message: `Pair ${p.name}: ${p.positive} ${a.toFixed(2)}mm vs ${p.negative} ${b.toFixed(2)}mm, skew ${Math.abs(a - b).toFixed(2)}mm > ${p.maxSkew}mm` });
+    if (p.impedance) {
+      const z = diffImpedance(design.board, "top", p.width, p.gap);
+      if (Math.abs(z - p.impedance) / p.impedance > 0.1) issues.push({ severity: "warning", code: "impedance", message: `Pair ${p.name}: ${p.width}/${p.gap}mm gives ${z.toFixed(0)}Ω on the outer layers, target ${p.impedance}Ω` });
+    }
+  }
+  for (const nc of design.netClasses) {
+    if (!nc.impedance) continue;
+    const seen = new Set<string>();
+    for (const it of analysis.items) {
+      if (it.kind !== "trace") continue;
+      const net = analysis.netOfItem(it);
+      if (!net || !nc.nets.includes(net) || seen.has(`${net}:${it.trace.layer}`)) continue;
+      const z = traceImpedance(design.board, it.trace.layer, it.trace.width);
+      if (Math.abs(z - nc.impedance) / nc.impedance > 0.1) {
+        seen.add(`${net}:${it.trace.layer}`);
+        issues.push({ severity: "warning", code: "impedance", message: `${net} on ${it.trace.layer}: ${it.trace.width}mm is ${z.toFixed(0)}Ω, class ${nc.name} targets ${nc.impedance}Ω`, at: it.trace.points[0] });
+      }
+    }
   }
   return issues;
 }

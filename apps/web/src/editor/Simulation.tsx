@@ -1,4 +1,4 @@
-import { parseValue, simulateAC, simulateDC, simulateTransient, type ACResult, type TransientResult } from "@pcbian/core";
+import { addSpiceModels, deleteSpiceModel, parseSpiceModels, parseValue, simulateAC, simulateDC, simulateTransient, sweepDC, type ACResult, type SweepResult, type TransientResult } from "@pcbian/core";
 import { useMemo, useState } from "react";
 import { useEditor } from "./context";
 import { LineChart, SERIES_COLORS, si } from "./LineChart";
@@ -6,7 +6,7 @@ import { LineChart, SERIES_COLORS, si } from "./LineChart";
 const fmtA = (i: number) => si(i, "A");
 const fmtW = (p: number) => si(p, "W");
 
-type Mode = "dc" | "tran" | "ac";
+type Mode = "dc" | "tran" | "ac" | "sweep" | "models";
 
 export function Simulation() {
   const [mode, setMode] = useState<Mode>("dc");
@@ -18,6 +18,8 @@ export function Simulation() {
             ["dc", "DC"],
             ["tran", "Transient"],
             ["ac", "AC"],
+            ["sweep", "Sweep"],
+            ["models", "Models"],
           ] as const
         ).map(([m, label]) => (
           <button key={m} className={mode === m ? "on" : ""} onClick={() => setMode(m)}>
@@ -25,7 +27,7 @@ export function Simulation() {
           </button>
         ))}
       </div>
-      {mode === "dc" ? <DcView /> : mode === "tran" ? <TransientView /> : <AcView />}
+      {mode === "dc" ? <DcView /> : mode === "tran" ? <TransientView /> : mode === "ac" ? <AcView /> : mode === "sweep" ? <SweepView /> : <ModelsView />}
     </div>
   );
 }
@@ -219,6 +221,115 @@ function AcView() {
           <ProbePicker all={Object.keys(res.nodes)} picked={probes} setPicked={setProbes} />
         </>
       )}
+    </>
+  );
+}
+
+const SWEEPABLE = /^(sim_vsource|sim_isource|resistor)/;
+
+function SweepView() {
+  const { design, toast } = useEditor();
+  const refs = design.components.filter((c) => SWEEPABLE.test(c.partId) && !c.dnp).map((c) => c.ref);
+  const [ref, setRef] = useState(refs[0] ?? "");
+  const [from, setFrom] = useState("0");
+  const [to, setTo] = useState("5");
+  const [points, setPoints] = useState(41);
+  const [res, setRes] = useState<SweepResult | null>(null);
+  const [probes, setProbes] = useState<string[]>([]);
+  const comp = design.components.find((c) => c.ref === ref);
+  const unit = comp?.partId.startsWith("resistor") ? "Ω" : comp?.partId.startsWith("sim_isource") ? "A" : "V";
+  const run = () => {
+    const a = parseValue(from);
+    const b = parseValue(to);
+    if (a === null || b === null || a === b) return toast("Enter a sweep range, e.g. 0 to 5");
+    const r = sweepDC(design, { ref, from: a, to: b, points });
+    setRes(r);
+    if (r.ok && !probes.some((p) => r.nodes[p])) setProbes(defaultProbes(Object.keys(r.nodes)));
+  };
+  const shown = res?.ok ? probes.filter((p) => res.nodes[p]) : [];
+  return (
+    <>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        DC sweep: step a source voltage or a resistance and plot the operating point, e.g. a transistor transfer curve.
+      </p>
+      {refs.length === 0 ? (
+        <div className="card small">Add a simulation source or a resistor to sweep.</div>
+      ) : (
+        <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
+          <select value={ref} onChange={(e) => setRef(e.target.value)}>
+            {refs.map((r) => (
+              <option key={r}>{r}</option>
+            ))}
+          </select>
+          <input value={from} onChange={(e) => setFrom(e.target.value)} style={{ width: 54 }} title="From" />
+          <span className="small muted">to</span>
+          <input value={to} onChange={(e) => setTo(e.target.value)} style={{ width: 54 }} title="To" />
+          <input type="number" value={points} min={2} max={500} onChange={(e) => setPoints(Number(e.target.value))} style={{ width: 54 }} title="Points" />
+          <button className="primary" onClick={run}>
+            Run
+          </button>
+        </div>
+      )}
+      {res && !res.ok && <div className="card small">{res.error}</div>}
+      {res?.ok && (
+        <>
+          <Warnings list={res.warnings} />
+          {shown.length > 0 && <LineChart title={`Node voltages vs ${res.param}`} x={res.x} xLabel={res.param} yUnit="V" formatX={(v) => si(v, unit)} series={shown.map((p) => ({ name: p, values: res.nodes[p] }))} />}
+          <h4>Probes</h4>
+          <ProbePicker all={Object.keys(res.nodes)} picked={probes} setPicked={setProbes} />
+        </>
+      )}
+    </>
+  );
+}
+
+function ModelsView() {
+  const { design, conn, toast } = useEditor();
+  const [text, setText] = useState("");
+  const users = (name: string) => design.components.filter((c) => c.model?.toUpperCase() === name).map((c) => c.ref);
+  return (
+    <>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Paste SPICE <code>.model</code> cards from a vendor (diodes, NPN/PNP, NMOS/PMOS, VDMOS). Assign them to parts in the Inspector.
+      </p>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} rows={6} style={{ width: "100%", fontFamily: "monospace", fontSize: 11 }} placeholder=".model 1N4148 D(IS=2.52n RS=0.568 N=1.752)" />
+      <button
+        className="primary small"
+        style={{ margin: "6px 0 10px" }}
+        disabled={!text.trim()}
+        onClick={() => {
+          const r = parseSpiceModels(text);
+          addSpiceModels(conn.doc, r.models);
+          toast([r.models.length ? `Imported ${r.models.map((m) => m.name).join(", ")}` : "", ...r.warnings].filter(Boolean).join(" · "));
+          if (r.models.length) setText("");
+        }}
+      >
+        Import models
+      </button>
+      {design.spiceModels.length === 0 && <p className="muted small">No models yet; parts use the built-in models.</p>}
+      <table className="pin-table">
+        <tbody>
+          {design.spiceModels.map((m) => (
+            <tr key={m.name}>
+              <td>
+                <b>{m.name}</b> <span className="muted">{m.type}</span>
+                <div className="muted small" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={Object.entries(m.params).map(([k, v]) => `${k}=${v}`).join(" ")}>
+                  {Object.entries(m.params)
+                    .slice(0, 6)
+                    .map(([k, v]) => `${k}=${+v.toPrecision(3)}`)
+                    .join(" ")}
+                </div>
+              </td>
+              <td className="muted small">{users(m.name).join(", ") || "unused"}</td>
+              <td>
+                <button className="ghost small danger" onClick={() => deleteSpiceModel(conn.doc, m.name)}>
+                  ×
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </>
   );
 }

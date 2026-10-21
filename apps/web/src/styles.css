@@ -811,3 +811,19 @@ h4 {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---------- stackup, review, history ---------- */
+.stackup td { padding: 3px 4px; }
+.stackup tr.cu td:first-child { color: #e0a83a; }
+.stackup tr.diel td { background: rgba(25, 158, 112, 0.08); }
+.stackup input, .stackup select { padding: 2px 4px; font-size: 12px; }
+.imp-grid { display: grid; grid-template-columns: auto 70px 1fr; gap: 4px 6px; align-items: center; }
+.imp-grid input { padding: 2px 4px; }
+.panel-tabs button { font-size: 12.5px; padding: 10px 2px; }
+.thread { margin-bottom: 8px; }
+.thread.sel { border-color: var(--accent); }
+.thread.resolved { opacity: 0.6; }
+.thread .reply { border-left: 2px solid var(--border); padding-left: 8px; margin: 4px 0; }
+.pin-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; border-radius: 9px 9px 9px 2px; color: #fff; font-size: 11px; font-weight: 700; }
+.version { margin-bottom: 8px; }
+.version.auto { opacity: 0.85; border-style: dashed; }

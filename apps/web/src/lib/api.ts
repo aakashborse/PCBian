@@ -1,3 +1,5 @@
+import type { DesignDiff } from "@pcbian/core";
+
 export interface ProjectMeta {
   id: string;
   name: string;
@@ -24,6 +26,16 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
+export interface VersionMeta {
+  id: string;
+  name: string;
+  author: string;
+  createdAt: number;
+  auto: boolean;
+  summary: string;
+  stats: { parts: number; traces: number; vias: number };
+}
+
 export const api = {
   health: () => call<{ ok: boolean; copilot: boolean }>("GET", "/api/health"),
   templates: () => call<Template[]>("GET", "/api/templates"),
@@ -37,4 +49,9 @@ export const api = {
   ask: (id: string, message: string, author: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot`, { message, author }),
   stopCopilot: (id: string) => call<{ stopped: boolean }>("POST", `/api/projects/${id}/copilot/stop`),
   resetCopilot: (id: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot/reset`),
+  versions: (id: string) => call<VersionMeta[]>("GET", `/api/projects/${id}/versions`),
+  saveVersion: (id: string, name: string, author: string) => call<VersionMeta>("POST", `/api/projects/${id}/versions`, { name, author }),
+  versionDiff: (id: string, vid: string) => call<{ diff: DesignDiff; summary: string }>("GET", `/api/projects/${id}/versions/${vid}/diff`),
+  restoreVersion: (id: string, vid: string, author: string) => call<VersionMeta>("POST", `/api/projects/${id}/versions/${vid}/restore`, { author }),
+  branchVersion: (id: string, vid: string, name: string, author: string) => call<ProjectMeta>("POST", `/api/projects/${id}/versions/${vid}/branch`, { name, author }),
 };

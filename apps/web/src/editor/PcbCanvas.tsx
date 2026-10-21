@@ -1,5 +1,10 @@
 import {
   addTrace,
+  addComment,
+  shoveTrace,
+  layerLabel,
+  viaKind,
+  viaLayers,
   addVia,
   addZone,
   boardOutlineZone,
@@ -43,14 +48,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
 import { publishCursor, type PresenceState } from "./presence";
 import { ShapeEl } from "./render";
+import { askCopilotAbout, CommentPins } from "./Review";
+import { useUser } from "../lib/user";
 import { beginPan, dedupe, useViewport } from "./viewport";
 
-export const LAYER_COLOR: Record<CopperLayer, string> = { top: "#d9534f", in1: "#d98b2b", in2: "#2fb39a", bottom: "#4a7fe0" };
-const PAD_COLOR: Record<CopperLayer | "tht", string> = { top: "#e0a83a", in1: "#d98b2b", in2: "#2fb39a", bottom: "#4f8fe6", tht: "#d9a53a" };
-const LAYER_NAME: Record<CopperLayer, string> = { top: "Top", in1: "Inner 1", in2: "Inner 2", bottom: "Bottom" };
+// Outer layers keep the familiar red/blue; inner layers take distinct hues in order.
+const INNER_COLORS = ["#d98b2b", "#2fb39a", "#b46fd8", "#c9b02e", "#e06c9f", "#5fae4a", "#4cb7d6", "#d6764c"];
+export const layerColor = (l: CopperLayer) => (l === "top" ? "#d9534f" : l === "bottom" ? "#4a7fe0" : INNER_COLORS[(Number(l.slice(2)) - 1) % INNER_COLORS.length]);
+const padColor = (l: CopperLayer) => (l === "top" ? "#e0a83a" : l === "bottom" ? "#4f8fe6" : layerColor(l));
+const THT_COLOR = "#d9a53a";
 const SNAP = 0.05;
 
-type Tool = "select" | "route" | "via" | "zone" | "keepout" | "outline" | "cutout" | "measure";
+type Tool = "select" | "route" | "via" | "zone" | "keepout" | "outline" | "cutout" | "measure" | "comment";
 const POLY_TOOLS: Tool[] = ["zone", "keepout", "outline", "cutout"];
 
 interface Routing {
@@ -73,7 +82,8 @@ function snap45(a: Vec, b: Vec): Vec {
 
 export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
   const ed = useEditor();
-  const { design, conn, selection, select, nets, toast } = ed;
+  const { design, conn, selection, select, nets, toast, projectId } = ed;
+  const user = useUser();
   const { doc, undo, provider } = conn;
   const vp = useViewport({ x: 120, y: 80, k: 12 }, 1, 200);
   const [tool, setTool] = useState<Tool>("select");
@@ -81,7 +91,12 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
   const [width, setWidth] = useState(design.board.defaultTraceWidth);
   const [routing, setRouting] = useState<Routing | null>(null);
   const [cursor, setCursor] = useState<Vec>({ x: 0, y: 0 });
-  const [show, setShow] = useState({ top: true, in1: true, in2: true, bottom: true, zones: true, silk: true, rats: true, drc: true });
+  const [show, setShow] = useState({ zones: true, silk: true, rats: true, drc: true });
+  const [hidden, setHidden] = useState<CopperLayer[]>([]);
+  const [viaMode, setViaMode] = useState<"through" | "span">("through");
+  const [shove, setShove] = useState(false);
+  const [viaSpan, setViaSpan] = useState<[CopperLayer, CopperLayer]>(["top", "in1"]);
+  const visible = (l: CopperLayer) => !hidden.includes(l);
   const [zoneDraft, setZoneDraft] = useState<Vec[] | null>(null);
   const [measure, setMeasure] = useState<Vec | null>(null);
   const layers = copperLayers(design.board);
@@ -131,10 +146,24 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ed.focus]);
 
+  /** Add a routed trace, shoving other nets' traces aside first when shove mode is on. */
+  const commitTrace = (t: { layer: CopperLayer; width: number; points: Vec[] }, net: string | undefined) => {
+    if (shove) {
+      const r = shoveTrace(design, t, net);
+      if (r.ok)
+        for (const c of r.changes) {
+          const old = tracesMap(doc).get(c.id);
+          if (old) tracesMap(doc).set(c.id, { ...old, points: c.points });
+        }
+      else toast(`Could not shove: ${r.reason}. The trace was added; DRC will flag the clash.`);
+    }
+    addTrace(doc, t);
+  };
+
   const finishRoute = (r: Routing | null) => {
     if (r && r.points.length >= 2) {
       undo.stopCapturing();
-      addTrace(doc, { layer: r.layer, width: r.width, points: r.points });
+      doc.transact(() => commitTrace({ layer: r.layer, width: r.width, points: r.points }, r.net));
     }
     setRouting(null);
   };
@@ -150,7 +179,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       undo.stopCapturing();
       if (tool === "zone") {
         addZone(doc, { net: zoneNet, layer, points: pts });
-        toast(`Copper pour for ${zoneNet} added on ${LAYER_NAME[layer]}`);
+        toast(`Copper pour for ${zoneNet} added on ${layerLabel(layer)}`);
       } else if (tool === "keepout") {
         addKeepout(doc, { points: pts, layers: [...layers], noTracks: true, noVias: true, noPours: true });
         toast("Keepout added on all layers (edit it in the inspector)");
@@ -169,17 +198,20 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     if (!zoneNet) return toast("Choose a net for the pour");
     undo.stopCapturing();
     addZone(doc, { net: zoneNet, layer, points: boardOutlineZone(design.board) });
-    toast(`${zoneNet} pour added on ${LAYER_NAME[layer]}`);
+    toast(`${zoneNet} pour added on ${layerLabel(layer)}`);
   };
 
-  const switchLayer = () => {
-    const next: CopperLayer = layers[(layers.indexOf(layer) + 1) % layers.length];
+  const switchLayer = (to?: CopperLayer) => {
+    const next: CopperLayer = to ?? layers[(layers.indexOf(layer) + 1) % layers.length];
+    if (next === layer) return;
     if (routing && routing.points.length >= 1) {
       const last = routing.points[routing.points.length - 1];
       const rules = netRules(design, routing.net);
+      // In blind/buried mode the via only spans the two layers being joined.
+      const span = viaMode === "span" ? { from: routing.layer, to: next } : undefined;
       doc.transact(() => {
-        if (routing.points.length >= 2) addTrace(doc, { layer: routing.layer, width: routing.width, points: routing.points });
-        addVia(doc, last, rules.viaDiameter, rules.viaDrill);
+        if (routing.points.length >= 2) commitTrace({ layer: routing.layer, width: routing.width, points: routing.points }, routing.net);
+        addVia(doc, last, rules.viaDiameter, rules.viaDrill, span);
       });
       setRouting({ ...routing, layer: next, points: [last] });
     }
@@ -237,7 +269,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     for (const v of design.vias) if (Math.hypot(p.x - v.x, p.y - v.y) <= v.diameter / 2 + tol) return { kind: "via", id: v.id };
     const ordered = [...design.traces].sort((a, b) => Number(b.layer === layer) - Number(a.layer === layer));
     for (const t of ordered) {
-      if (!show[t.layer]) continue;
+      if (!visible(t.layer)) continue;
       for (let i = 1; i < t.points.length; i++) if (pointSegmentDistance(p, t.points[i - 1], t.points[i]) <= t.width / 2 + tol) return { kind: "trace", id: t.id };
     }
     const comps = [...design.components].filter((c) => getPart(c.partId)?.footprint).sort((a, b) => Number(b.pcb.side === layer) - Number(a.pcb.side === layer));
@@ -246,7 +278,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     for (const k of design.keepouts) if (pointInPolygon(p, k.points)) return { kind: "keepout", id: k.id };
     if (show.zones) {
       const zs = [...design.zones].sort((a, b) => Number(b.layer === layer) - Number(a.layer === layer));
-      for (const z of zs) if (show[z.layer] && pointInPolygon(p, z.points)) return { kind: "zone", id: z.id };
+      for (const z of zs) if (visible(z.layer) && pointInPolygon(p, z.points)) return { kind: "zone", id: z.id };
     }
     return null;
   };
@@ -269,7 +301,24 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
 
     if (tool === "via") {
       undo.stopCapturing();
-      addVia(doc, snapped(raw));
+      if (viaMode === "span") {
+        const [a, b] = [layers.indexOf(viaSpan[0]), layers.indexOf(viaSpan[1])];
+        // A microvia joins an outer layer to its neighbour: laser drilled, small.
+        const micro = Math.abs(a - b) === 1 && (Math.min(a, b) === 0 || Math.max(a, b) === layers.length - 1);
+        addVia(doc, snapped(raw), micro ? 0.25 : 0.5, micro ? 0.1 : 0.25, { from: viaSpan[0], to: viaSpan[1] });
+      } else addVia(doc, snapped(raw));
+      return;
+    }
+    if (tool === "comment") {
+      const text = prompt("Comment (mention @copilot to ask the AI)");
+      if (text?.trim()) {
+        const hit = pick(raw, px * 4);
+        const ref = hit?.kind === "component" ? design.components.find((c) => c.id === hit.id)?.ref : undefined;
+        const c = addComment(doc, { view: "pcb", pos: snapped(raw), ref, author: user.name, color: user.color, text: text.trim() });
+        select({ kind: "comment", id: c.id });
+        if (/@copilot\b/i.test(text)) askCopilotAbout(projectId, c, text.trim(), user.name).then(() => toast("Copilot is on it"), (err) => toast((err as Error).message));
+      }
+      setTool("select");
       return;
     }
     if (tool === "measure") {
@@ -345,7 +394,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     const r = autoRoute(design, { width });
     doc.transact(() => {
       for (const t of r.traces) addTrace(doc, t);
-      for (const v of r.vias) addVia(doc, v, v.diameter, v.drill);
+      for (const v of r.vias) addVia(doc, v, v.diameter, v.drill, v);
     });
     toast(`Routed ${r.routed} connection${r.routed === 1 ? "" : "s"} with ${r.vias.length} via${r.vias.length === 1 ? "" : "s"} in ${Math.round(performance.now() - t0)}ms${r.failed.length ? ` · ${r.failed.length} failed` : ""}`);
   };
@@ -395,7 +444,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
           <path d={boardPath} fill="#0d3326" fillRule="evenodd" stroke="#e8d36b" strokeWidth={Math.max(0.1, px * 1.5)} />
 
           {layerOrder.map((l) => {
-            if (!show[l]) return null;
+            if (!visible(l)) return null;
             const dim = l !== layer ? 0.45 : 0.92;
             return (
               <g key={l} opacity={dim}>
@@ -422,8 +471,19 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
                                 ) : (
                                   <polyline key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} stroke={color} strokeWidth={c.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
                                 );
+                              const hw = f.hatch?.width ?? 0;
                               return (
                                 <>
+                                  {f.hatch && (
+                                    <>
+                                      <pattern id={`hp-${z.id}`} patternUnits="userSpaceOnUse" x={f.hatch.origin.x} y={f.hatch.origin.y} width={hw + f.hatch.gap} height={hw + f.hatch.gap}>
+                                        <rect x={hw} y={hw} width={f.hatch.gap} height={f.hatch.gap} fill="black" />
+                                      </pattern>
+                                      <polygon points={pts} fill={`url(#hp-${z.id})`} />
+                                      <polygon points={pts} fill="none" stroke="white" strokeWidth={2 * hw} />
+                                      {f.halos.map((c, i) => shape(c, 40000 + i, "white"))}
+                                    </>
+                                  )}
                                   {f.cutouts.map((c, i) => shape(c, i, "black"))}
                                   {f.spokes.map((sp, i) => shape({ kind: "line", points: sp.points, width: sp.width }, 10000 + i, "white"))}
                                   {f.clip.map((c, i) => shape(c, 20000 + i, "black"))}
@@ -432,15 +492,15 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
                               );
                             })()}
                           </mask>
-                          <polygon points={pts} fill={LAYER_COLOR[l]} opacity={0.42} mask={`url(#zm-${z.id})`} />
-                          <polygon points={pts} fill="none" stroke={sel ? "#ffffff" : LAYER_COLOR[l]} strokeWidth={px * (sel ? 2 : 1)} strokeDasharray={`${px * 6} ${px * 4}`} />
+                          <polygon points={pts} fill={layerColor(l)} opacity={0.42} mask={`url(#zm-${z.id})`} />
+                          <polygon points={pts} fill="none" stroke={sel ? "#ffffff" : layerColor(l)} strokeWidth={px * (sel ? 2 : 1)} strokeDasharray={`${px * 6} ${px * 4}`} />
                         </g>
                       );
                     })}
                 {drops
                   .filter((t) => t.layer === l)
                   .map((t, i) => (
-                    <polygon key={`td${i}`} points={t.points.map((p) => `${p.x},${p.y}`).join(" ")} fill={LAYER_COLOR[l]} />
+                    <polygon key={`td${i}`} points={t.points.map((p) => `${p.x},${p.y}`).join(" ")} fill={layerColor(l)} />
                   ))}
                 {design.traces
                   .filter((t) => t.layer === l)
@@ -451,7 +511,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
                       <polyline
                         key={t.id}
                         points={t.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                        stroke={sel ? "#ffffff" : sameNet ? "#ff9a8f" : LAYER_COLOR[l]}
+                        stroke={sel ? "#ffffff" : sameNet ? "#ff9a8f" : layerColor(l)}
                         strokeWidth={t.width}
                         fill="none"
                         strokeLinecap="round"
@@ -462,7 +522,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
                 {placed.flatMap((c) =>
                   padsOf(c)
                     .filter((p) => (p.drill ? l === layer : p.layers[0] === l))
-                    .map((p, i) => <PadEl key={`${c.id}-${i}`} pad={p} color={p.drill ? PAD_COLOR.tht : PAD_COLOR[l]} />),
+                    .map((p, i) => <PadEl key={`${c.id}-${i}`} pad={p} color={p.drill ? THT_COLOR : padColor(l)} />),
                 )}
               </g>
             );
@@ -470,9 +530,13 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
 
           {design.vias.map((v) => {
             const sel = selection?.kind === "via" && selection.id === v.id;
+            const kind = viaKind(design.board, v);
+            const span = viaLayers(design.board, v);
             return (
               <g key={v.id}>
-                <circle cx={v.x} cy={v.y} r={v.diameter / 2} fill={sel ? "#ffffff" : "#c9b458"} />
+                <circle cx={v.x} cy={v.y} r={v.diameter / 2} fill={sel ? "#ffffff" : kind === "through" ? "#c9b458" : layerColor(span[0])} />
+                {/* Blind/buried/micro vias: the inner ring shows the far layer of the span. */}
+                {kind !== "through" && !sel && <circle cx={v.x} cy={v.y} r={(v.diameter + v.drill) / 4} fill={layerColor(span[span.length - 1])} />}
                 <circle cx={v.x} cy={v.y} r={v.drill / 2} fill="#0b0d10" />
               </g>
             );
@@ -512,9 +576,9 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
           {zoneDraft && POLY_TOOLS.includes(tool) && (
             <polygon
               points={[...zoneDraft, cursor].map((p) => `${p.x},${p.y}`).join(" ")}
-              fill={LAYER_COLOR[layer]}
+              fill={layerColor(layer)}
               fillOpacity={0.2}
-              stroke={LAYER_COLOR[layer]}
+              stroke={layerColor(layer)}
               strokeWidth={px * 1.5}
               strokeDasharray={`${px * 5} ${px * 4}`}
               pointerEvents="none"
@@ -523,7 +587,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
           {routing && (
             <polyline
               points={[...routing.points, cursor].map((p) => `${p.x},${p.y}`).join(" ")}
-              stroke={LAYER_COLOR[routing.layer]}
+              stroke={layerColor(routing.layer)}
               strokeOpacity={0.8}
               strokeWidth={routing.width}
               fill="none"
@@ -533,6 +597,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             />
           )}
 
+          <CommentPins view="pcb" r={px * 11} />
           {presence.map((p) =>
             p.cursor?.view === "pcb" ? (
               <g key={p.clientId} transform={`translate(${p.cursor.x},${p.cursor.y}) scale(${px})`} pointerEvents="none">
@@ -563,6 +628,9 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         <button className={tool === "keepout" ? "active" : ""} onClick={() => setTool("keepout")} title="Draw a keepout area (K)">
           Keepout
         </button>
+        <button className={tool === "comment" ? "active" : ""} onClick={() => setTool("comment")} title="Pin a review comment">
+          Comment
+        </button>
         <button className={tool === "measure" ? "active" : ""} onClick={() => setTool("measure")} title="Measure / add a dimension (M)">
           Measure
         </button>
@@ -585,13 +653,39 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
           <option value="rect">Reset to rectangle</option>
         </select>
         <span className="sep" />
-        <select value={layer} onChange={(e) => setLayer(e.target.value as CopperLayer)} title="Active layer (L cycles; while routing this drops a via)" style={{ color: LAYER_COLOR[layer] }}>
+        <select value={layer} onChange={(e) => switchLayer(e.target.value as CopperLayer)} title="Active layer (L cycles; while routing this drops a via)" style={{ color: layerColor(layer) }}>
           {layers.map((l) => (
             <option key={l} value={l}>
-              {LAYER_NAME[l]}
+              {layerLabel(l)}
             </option>
           ))}
         </select>
+        {tool === "route" && (
+          <label className="small row" style={{ gap: 4 }} title="Push other nets' traces aside when a new trace needs the room">
+            <input type="checkbox" checked={shove} onChange={(e) => setShove(e.target.checked)} />
+            Shove
+          </label>
+        )}
+        {layers.length > 2 && (tool === "via" || tool === "route") && (
+          <select value={viaMode} onChange={(e) => setViaMode(e.target.value as "through" | "span")} title="Via type for the via tool and for layer changes while routing">
+            <option value="through">Through vias</option>
+            <option value="span">Blind / buried vias</option>
+          </select>
+        )}
+        {layers.length > 2 && tool === "via" && viaMode === "span" && (
+          <>
+            {[0, 1].map((k) => (
+              <select key={k} value={viaSpan[k]} onChange={(e) => setViaSpan(k === 0 ? [e.target.value as CopperLayer, viaSpan[1]] : [viaSpan[0], e.target.value as CopperLayer])} title={k === 0 ? "Via starts on" : "Via ends on"}>
+                {layers.map((l) => (
+                  <option key={l} value={l}>
+                    {k === 0 ? "from " : "to "}
+                    {layerLabel(l)}
+                  </option>
+                ))}
+              </select>
+            ))}
+          </>
+        )}
         <select value={width} onChange={(e) => setWidth(Number(e.target.value))} title="Trace width (mm)">
           {[0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.8, 1.0].map((w) => (
             <option key={w} value={w}>
@@ -640,7 +734,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         <b className="small">Layers</b>
         {(
           [
-            ...layers.map((l) => [l, `${LAYER_NAME[l]} copper`, LAYER_COLOR[l]] as const),
+            ...layers.map((l) => [l, `${layerLabel(l)} copper`, layerColor(l)] as const),
             ["zones", "Copper pours", "#7c8796"],
             ["silk", "Silkscreen", "#f3f4f6"],
             ["rats", "Ratsnest", "#9ca3af"],
@@ -648,7 +742,13 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
           ] as const
         ).map(([k, label, color]) => (
           <label key={k}>
-            <input type="checkbox" checked={show[k]} onChange={(e) => setShow({ ...show, [k]: e.target.checked })} />
+            <input
+              type="checkbox"
+              checked={k in show ? show[k as keyof typeof show] : visible(k as CopperLayer)}
+              onChange={(e) =>
+                k in show ? setShow({ ...show, [k]: e.target.checked }) : setHidden(e.target.checked ? hidden.filter((x) => x !== k) : [...hidden, k as CopperLayer])
+              }
+            />
             <span className="swatch" style={{ background: color }} />
             {label}
           </label>

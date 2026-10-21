@@ -1,10 +1,11 @@
 // KiCad interoperability: S-expression parsing, footprint/symbol import and
 // board/netlist export (KiCad 7/8 file formats).
 import { analyzeCopper } from "./copper";
-import { copperLayers, netRules } from "./doc";
+import { netRules } from "./doc";
+import { copperLayers, kicadLayerName, OZ_MM, stackupOf, viaKind, viaLayers } from "./stackup";
 import { icSymbol, getPart } from "./library";
 import { computeNets, netByTerminal, termKey } from "./netlist";
-import type { CopperLayer, Design, Footprint, Pad, PartDef, PartSymbol, PinType, Shape, SymbolPin, Vec } from "./types";
+import type { Design, Footprint, Pad, PartDef, PartSymbol, PinType, Shape, SymbolPin, Vec } from "./types";
 
 // ---------- S-expressions ----------
 
@@ -219,7 +220,6 @@ export function importKicadPart(symText: string, modText: string, id = `kicad_${
 
 // ---------- export ----------
 
-const KLAYER: Record<CopperLayer, string> = { top: "F.Cu", in1: "In1.Cu", in2: "In2.Cu", bottom: "B.Cu" };
 
 /** KiCad netlist (.net, s-expression format "E") importable by Pcbnew. */
 export function kicadNetlist(design: Design): string {
@@ -253,7 +253,7 @@ export function kicadPcb(design: Design): string {
   out.push(`(kicad_pcb (version 20240108) (generator "pcbian") (generator_version "0.2")`);
   out.push(`  (general (thickness ${f(design.board.thickness)}) (legacy_teardrops no))`, `  (paper "A4")`, "  (layers");
   out.push(`    (0 "F.Cu" signal)`);
-  if (layers.length === 4) out.push(`    (1 "In1.Cu" signal)`, `    (2 "In2.Cu" signal)`);
+  layers.slice(1, -1).forEach((l) => out.push(`    (${l.slice(2)} "${kicadLayerName(l)}" signal)`));
   out.push(
     `    (31 "B.Cu" signal)`,
     `    (34 "B.Paste" user)`,
@@ -268,8 +268,18 @@ export function kicadPcb(design: Design): string {
     `    (48 "B.Fab" user)`,
     `    (49 "F.Fab" user)`,
     "  )",
-    "  (setup (pad_to_mask_clearance 0))",
   );
+  // Physical stackup so KiCad's board setup (and its impedance calculator) sees the same build.
+  const st = stackupOf(design.board);
+  out.push("  (setup", "    (stackup");
+  if (st.maskThickness) out.push(`      (layer "F.Mask" (type "Top Solder Mask") (thickness ${f(st.maskThickness)}) (epsilon_r ${st.maskEr ?? 3.8}))`);
+  layers.forEach((l, i) => {
+    out.push(`      (layer "${kicadLayerName(l)}" (type "copper") (thickness ${f(st.copperOz[i] * OZ_MM)}))`);
+    const d = st.dielectrics[i];
+    if (d) out.push(`      (layer "dielectric ${i + 1}" (type "${d.kind}") (thickness ${f(d.thickness)}) (material "FR4") (epsilon_r ${d.er}) (loss_tangent 0.02))`);
+  });
+  if (st.maskThickness) out.push(`      (layer "B.Mask" (type "Bottom Solder Mask") (thickness ${f(st.maskThickness)}) (epsilon_r ${st.maskEr ?? 3.8}))`);
+  out.push("      (copper_finish \"HAL lead-free\")", "    )", "    (pad_to_mask_clearance 0)", "  )");
   out.push(`  (net 0 "")`);
   for (const [name, code] of netCode) out.push(`  (net ${code} ${q(name)})`);
 
@@ -316,18 +326,24 @@ export function kicadPcb(design: Design): string {
     for (let i = 1; i < t.points.length; i++) {
       const a = t.points[i - 1];
       const b = t.points[i];
-      out.push(`  (segment (start ${f(a.x)} ${f(a.y)}) (end ${f(b.x)} ${f(b.y)}) (width ${f(t.width)}) (layer "${KLAYER[t.layer]}") ${netRef(net)} (uuid ${q(uuid())}))`);
+      out.push(`  (segment (start ${f(a.x)} ${f(a.y)}) (end ${f(b.x)} ${f(b.y)}) (width ${f(t.width)}) (layer "${kicadLayerName(t.layer)}") ${netRef(net)} (uuid ${q(uuid())}))`);
     }
   }
   for (const v of design.vias) {
     const it = analysis.items.find((x) => x.key === `via:${v.id}`);
-    out.push(`  (via (at ${f(v.x)} ${f(v.y)}) (size ${f(v.diameter)}) (drill ${f(v.drill)}) (layers "F.Cu" "B.Cu") ${netRef(it && analysis.netOfItem(it))} (uuid ${q(uuid())}))`);
+    const span = viaLayers(design.board, v);
+    const kind = viaKind(design.board, v);
+    // KiCad writes buried vias with the "blind" keyword too.
+    const type = kind === "through" ? "" : kind === "micro" ? "micro " : "blind ";
+    out.push(`  (via ${type}(at ${f(v.x)} ${f(v.y)}) (size ${f(v.diameter)}) (drill ${f(v.drill)}) (layers "${kicadLayerName(span[0])}" "${kicadLayerName(span[span.length - 1])}") ${netRef(it && analysis.netOfItem(it))} (uuid ${q(uuid())}))`);
   }
   for (const z of design.zones) {
     const r = netRules(design, z.net);
-    out.push(`  (zone ${netRef(z.net)} (net_name ${q(z.net)}) (layer "${KLAYER[z.layer]}") (uuid ${q(uuid())}) (hatch edge 0.5)`);
-    out.push(`    (connect_pads (clearance ${f(r.clearance)})) (min_thickness 0.25) (filled_areas_thickness no)`);
-    out.push(`    (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))`);
+    out.push(`  (zone ${netRef(z.net)} (net_name ${q(z.net)}) (layer "${kicadLayerName(z.layer)}") (uuid ${q(uuid())}) (hatch edge 0.5)`);
+    if (z.priority) out.push(`    (priority ${z.priority})`);
+    out.push(`    (connect_pads${z.padConnection === "solid" ? " yes" : ""} (clearance ${f(r.clearance)})) (min_thickness 0.25) (filled_areas_thickness no)`);
+    const hatch = z.fill === "hatch" ? ` (mode hatch) (hatch_thickness ${f(z.hatchWidth ?? Math.max(0.25, r.traceWidth))}) (hatch_gap ${f(z.hatchGap ?? 1)}) (hatch_orientation 0)` : "";
+    out.push(`    (fill yes${hatch} (thermal_gap ${f(z.thermalGap ?? 0.5)}) (thermal_bridge_width ${f(z.spokeWidth ?? Math.max(0.3, r.traceWidth))})${z.removeIslands === false ? " (island_removal_mode 1)" : ""})`);
     out.push(`    (polygon (pts ${z.points.map((p) => `(xy ${f(p.x)} ${f(p.y)})`).join(" ")}))`);
     out.push("  )");
   }

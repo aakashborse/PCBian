@@ -9,6 +9,8 @@ import { copilotEnabled, isBusy, resetCopilot, runCopilot, stopCopilot } from ".
 import { dropRoom, getRoom, roomIdFromRequest, saveAll } from "./rooms.js";
 import { createProjectMeta, deleteProjectMeta, getProject, listProjects, updateProjectMeta } from "./store.js";
 import { buildTemplate, TEMPLATES, type TemplateId } from "./templates.js";
+import { deleteVersions, diffVersion, listVersions, restoreVersion, saveVersion, versionUpdate } from "./versions.js";
+import * as Y from "yjs";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const app = express();
@@ -76,6 +78,7 @@ app.patch("/api/projects/:id", (req, res) => {
 app.delete("/api/projects/:id", (req, res) => {
   dropRoom(req.params.id);
   deleteProjectMeta(req.params.id);
+  deleteVersions(req.params.id);
   res.status(204).end();
 });
 
@@ -88,8 +91,11 @@ app.post("/api/projects/:id/copilot", (req, res) => {
   if (!message) return void res.status(400).json({ error: "Empty message" });
   if (isBusy(p.id)) return void res.status(409).json({ error: "The copilot is busy with another request on this project" });
   updateProjectMeta(p.id, {});
+  const room = getRoom(p.id);
+  // Snapshot before the copilot edits, so its work can be compared and rolled back.
+  saveVersion(room, `Before copilot: ${message.slice(0, 60)}`, author, true);
   // The reply streams into the shared Yjs chat log; the HTTP call returns immediately.
-  void runCopilot(getRoom(p.id), message, author);
+  void runCopilot(room, message, author).finally(() => saveVersion(room, "After copilot", "Copilot", true));
   res.status(202).json({ ok: true });
 });
 
@@ -103,6 +109,51 @@ app.post("/api/projects/:id/copilot/reset", (req, res) => {
   if (isBusy(p.id)) return void res.status(409).json({ error: "The copilot is busy" });
   resetCopilot(getRoom(p.id));
   res.json({ ok: true });
+});
+
+// ----- version history -----
+
+app.get("/api/projects/:id/versions", (req, res) => {
+  if (!getProject(req.params.id)) return void res.status(404).json({ error: "Not found" });
+  res.json(listVersions(req.params.id));
+});
+
+app.post("/api/projects/:id/versions", (req, res) => {
+  const p = getProject(req.params.id);
+  if (!p) return void res.status(404).json({ error: "Not found" });
+  const name = String(req.body?.name ?? "").trim().slice(0, 80) || "Saved version";
+  const meta = saveVersion(getRoom(p.id), name, String(req.body?.author ?? "Someone").slice(0, 40));
+  res.status(201).json(meta);
+});
+
+app.get("/api/projects/:id/versions/:vid/diff", (req, res) => {
+  const p = getProject(req.params.id);
+  const d = p && diffVersion(getRoom(p.id), req.params.vid);
+  if (!d) return void res.status(404).json({ error: "Not found" });
+  res.json(d);
+});
+
+app.post("/api/projects/:id/versions/:vid/restore", (req, res) => {
+  const p = getProject(req.params.id);
+  const v = p && restoreVersion(getRoom(p.id), req.params.vid, String(req.body?.author ?? "Someone").slice(0, 40));
+  if (!v) return void res.status(404).json({ error: "Not found" });
+  res.json(v);
+});
+
+// Branch: a new project starting from a version.
+app.post("/api/projects/:id/versions/:vid/branch", (req, res) => {
+  const p = getProject(req.params.id);
+  const u = p && versionUpdate(p.id, req.params.vid);
+  if (!p || !u) return void res.status(404).json({ error: "Not found" });
+  const v = listVersions(p.id).find((x) => x.id === req.params.vid);
+  const name = String(req.body?.name ?? "").trim() || `${p.name} (${v?.name ?? "branch"})`;
+  const meta = createProjectMeta(name);
+  const room = getRoom(meta.id);
+  Y.applyUpdate(room.doc, u);
+  setName(room.doc, name);
+  room.save();
+  saveVersion(room, `Branched from ${p.name}: ${v?.name ?? req.params.vid}`, String(req.body?.author ?? "Someone").slice(0, 40));
+  res.status(201).json(meta);
 });
 
 // Serve the built web app in production.

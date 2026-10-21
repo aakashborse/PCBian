@@ -1,8 +1,9 @@
 // Auto-placement and a multi-layer, net-class-aware grid A* auto-router.
-import { analyzeCopper, ratsnest } from "./copper";
-import { courtyardRect, padRect, pointInPolygon, pointSegmentDistance, polygonSpans, segmentRectDistance, type Rect, type WorldPad } from "./geometry";
+import { analyzeCopper, copperGap, ratsnest, sharedLayers, type CopperItem } from "./copper";
+import { courtyardRect, dist, padRect, pointInPolygon, pointSegmentDistance, polygonSpans, segmentRectDistance, type Rect, type WorldPad } from "./geometry";
 import { getPart } from "./library";
-import { boardOutline, copperLayers, netRules } from "./doc";
+import { boardOutline, netRules } from "./doc";
+import { copperLayers } from "./stackup";
 import { computeNets } from "./netlist";
 import type { ComponentData, CopperLayer, Design, PcbPlacement, Trace, Vec } from "./types";
 
@@ -204,13 +205,33 @@ export interface RouteOptions {
   viaDrill?: number;
   /** Only route these nets (default: all). */
   nets?: string[];
+  /** Allow blind/buried vias that span only the layers they join (HDI boards). Default: through vias only. */
+  blindVias?: boolean;
+  /** Route differential pairs as coupled traces first (default true). */
+  coupled?: boolean;
+  /** Internal: connections to route instead of the ratsnest. */
+  lines?: RouteLine[];
+  /** Internal: treat these nets as the mapped net (a pair's two nets are one obstacle-free region). */
+  mergeNets?: Record<string, string>;
+  /** Internal: trace width for every connection (no net-class widths, no neck-down). */
+  forceWidth?: number;
+}
+
+export interface RouteLine {
+  net: string;
+  a: Vec;
+  b: Vec;
+  /** Layers the connection may start/end on (default: the pad's layers). */
+  layers?: CopperLayer[];
 }
 
 export interface RouteResult {
   traces: Omit<Trace, "id">[];
-  vias: (Vec & { diameter: number; drill: number })[];
+  vias: (Vec & { diameter: number; drill: number; from?: CopperLayer; to?: CopperLayer })[];
   routed: number;
   failed: { net: string; a: Vec; b: Vec }[];
+  /** Differential pairs routed as coupled traces. */
+  coupled?: string[];
 }
 
 
@@ -260,9 +281,10 @@ class MinHeap {
   }
 }
 
-export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult {
+function routeCore(design: Design, opts: RouteOptions = {}): RouteResult {
   const baseWidth = opts.width ?? design.board.defaultTraceWidth;
   const allowVias = opts.allowVias ?? true;
+  const blind = opts.blindVias ?? false;
   const layers = copperLayers(design.board);
   const L = layers.length;
   const res = opts.grid ?? gridFor(design);
@@ -275,7 +297,8 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
   // Influence radius of the clearance field: the largest clearance + half-width/via radius we will ever test.
   const classes = [netRules(design, undefined), ...design.netClasses.map((c) => netRules(design, c.nets[0]))];
   const maxClear = Math.max(boardClear, ...classes.map((c) => c.clearance));
-  const maxHalf = Math.max(baseWidth, ...classes.map((c) => c.traceWidth), ...classes.map((c) => c.viaDiameter), opts.viaDiameter ?? 0) / 2;
+  const pairWidths = design.diffPairs.map((p) => p.width);
+  const maxHalf = Math.max(baseWidth, ...classes.map((c) => c.traceWidth), ...pairWidths, ...classes.map((c) => c.viaDiameter), opts.viaDiameter ?? 0, opts.forceWidth ?? 0) / 2;
   const fieldR = maxClear * 2 + maxHalf + 2 * res;
 
   // Per layer: distance to nearest copper (d1, its net n1) and to the nearest copper of a different net (d2).
@@ -283,7 +306,8 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
   const d2 = layers.map(() => new Float32Array(N).fill(Infinity));
   const n1 = layers.map(() => new Int32Array(N).fill(-1));
   const netIndex = new Map<string, number>();
-  const idx = (net: string) => {
+  const idx = (name: string) => {
+    const net = opts.mergeNets?.[name] ?? name;
     if (!netIndex.has(net)) netIndex.set(net, netIndex.size);
     return netIndex.get(net)!;
   };
@@ -322,8 +346,8 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
       stamp(layer, net, bbox, (p) => pointSegmentDistance(p, a, b) - w / 2, surplus);
     }
   };
-  const stampVia = (net: number, v: Vec, dia: number, surplus: number) => {
-    for (let l = 0; l < L; l++) stamp(l, net, { x0: v.x - dia / 2, y0: v.y - dia / 2, x1: v.x + dia / 2, y1: v.y + dia / 2 }, (p) => Math.hypot(p.x - v.x, p.y - v.y) - dia / 2, surplus);
+  const stampVia = (net: number, v: Vec, dia: number, surplus: number, lo = 0, hi = L - 1) => {
+    for (let l = lo; l <= hi; l++) stamp(l, net, { x0: v.x - dia / 2, y0: v.y - dia / 2, x1: v.x + dia / 2, y1: v.y + dia / 2 }, (p) => Math.hypot(p.x - v.x, p.y - v.y) - dia / 2, surplus);
   };
 
   // Existing copper.
@@ -339,7 +363,8 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     } else if (it.kind === "trace") {
       if (layers.includes(it.trace.layer)) stampTrace(layers.indexOf(it.trace.layer), net, it.trace.points, it.trace.width, surplus);
     } else {
-      stampVia(net, it.via, it.via.diameter, surplus);
+      const span = it.layers.map((l) => layers.indexOf(l)).filter((i) => i >= 0);
+      if (span.length) stampVia(net, it.via, it.via.diameter, surplus, Math.min(...span), Math.max(...span));
     }
   }
 
@@ -393,7 +418,7 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
   }
 
   const result: RouteResult = { traces: [], vias: [], routed: 0, failed: [] };
-  const lines = ratsnest(design, analysis)
+  const lines: RouteLine[] = (opts.lines ?? ratsnest(design, analysis))
     .filter((l) => !opts.nets || opts.nets.includes(l.net))
     .sort((a, b) => Math.hypot(a.a.x - a.b.x, a.a.y - a.b.y) - Math.hypot(b.a.x - b.b.x, b.a.y - b.b.y));
   const g = new Float32Array(L * N);
@@ -415,15 +440,15 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
   const search = (line: (typeof lines)[number], width: number, viaD: number) => {
     const net = idx(line.net);
     const rules = netRules(design, line.net);
-    const need = Math.max(rules.clearance, boardClear) + width / 2 + margin;
-    const needVia = Math.max(rules.clearance, boardClear) + viaD / 2 + margin;
+    const need = Math.max(rules.clearance, boardClear, opts.clearance ?? 0) + width / 2 + margin;
+    const needVia = Math.max(rules.clearance, boardClear, opts.clearance ?? 0) + viaD / 2 + margin;
     const edge = 0.3 + width / 2;
     const edgeVia = 0.3 + viaD / 2;
     const pa = padAt.get(`${line.a.x.toFixed(4)},${line.a.y.toFixed(4)}`);
     const pb = padAt.get(`${line.b.x.toFixed(4)},${line.b.y.toFixed(4)}`);
     const layerIdx = (ls: CopperLayer[] | undefined) => (ls ?? layers).filter((l) => layers.includes(l)).map((l) => layers.indexOf(l));
-    const layersA = layerIdx(pa?.layers);
-    const layersB = new Set(layerIdx(pb?.layers));
+    const layersA = layerIdx(line.layers ?? pa?.layers);
+    const layersB = new Set(layerIdx(line.layers ?? pb?.layers));
     const ax = Math.round(line.a.x / res);
     const ay = Math.round(line.a.y / res);
     const bx = Math.round(line.b.x / res);
@@ -431,9 +456,9 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     const clearOf = (l: number, i: number) => (n1[l][i] === net ? d2[l][i] : d1[l][i]);
     const edgeOk = (gx: number, gy: number, e: number) => edgeD[gy * W + gx] >= e;
     const ok = (l: number, gx: number, gy: number) => clearOf(l, gy * W + gx) >= need && edgeOk(gx, gy, edge);
-    const viaOk = (gx: number, gy: number) => {
+    const viaOk = (gx: number, gy: number, lo = 0, hi = L - 1) => {
       if (!edgeOk(gx, gy, edgeVia) || noVia[gy * W + gx]) return false;
-      for (let l = 0; l < L; l++) if (clearOf(l, gy * W + gx) < needVia) return false;
+      for (let l = lo; l <= hi; l++) if (clearOf(l, gy * W + gx) < needVia) return false;
       return true;
     };
     const h = (gx: number, gy: number) => {
@@ -496,10 +521,15 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
         for (let l2 = 0; l2 < L; l2++) {
           if (l2 === l) continue;
           const nid = l2 * N + cell;
-          const ng = g[id] + viaCost;
+          // Blind vias cost a little more per layer they cross; through vias cost the same anywhere.
+          const ng = g[id] + viaCost * (blind ? 1 + 0.15 * (Math.abs(l2 - l) - 1) : 1);
           if (ng >= g[nid]) continue;
-          checked ??= viaOk(gx, gy);
-          if (!checked) break;
+          if (blind) {
+            if (!viaOk(gx, gy, Math.min(l, l2), Math.max(l, l2))) continue;
+          } else {
+            checked ??= viaOk(gx, gy);
+            if (!checked) break;
+          }
           g[nid] = ng;
           came[nid] = id;
           heap.push(nid, ng + h(gx, gy));
@@ -514,10 +544,10 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     const rules = netRules(design, line.net);
     const viaD = opts.viaDiameter ?? rules.viaDiameter;
     const viaDrill = opts.viaDrill ?? rules.viaDrill;
-    let width = rules.className === "Default" ? baseWidth : rules.traceWidth;
+    let width = opts.forceWidth ?? (rules.className === "Default" ? baseWidth : rules.traceWidth);
     let goal = search(line, width, viaD);
     // Neck down: if a wide net-class trace cannot escape fine-pitch pads, retry at the base width.
-    if (goal < 0 && width > baseWidth) {
+    if (goal < 0 && width > baseWidth && !opts.forceWidth) {
       width = baseWidth;
       goal = search(line, width, viaD);
     }
@@ -550,8 +580,11 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
       if (step.l !== runLayer) {
         flush();
         const v = run[run.length - 1];
-        result.vias.push({ ...v, diameter: viaD, drill: viaDrill });
-        stampVia(net, v, viaD, surplus);
+        const lo = blind ? Math.min(runLayer, step.l) : 0;
+        const hi = blind ? Math.max(runLayer, step.l) : L - 1;
+        const span = lo === 0 && hi === L - 1 ? {} : { from: layers[lo], to: layers[hi] };
+        result.vias.push({ ...v, diameter: viaD, drill: viaDrill, ...span });
+        stampVia(net, v, viaD, surplus, lo, hi);
         run = [v];
         runLayer = step.l;
       }
@@ -601,4 +634,150 @@ export function gridFor(design: Design): number {
   const layers = design.board.layers;
   while ((design.board.width / res) * (design.board.height / res) * layers > 2_000_000) res = Math.round(res * 2 * 100) / 100;
   return res;
+}
+
+// ---------- differential pairs ----------
+
+/**
+ * Route every connection: differential pairs first as coupled traces, then the rest.
+ * A pair is routed as one wide centreline (2·width + gap) that treats both nets as its own copper,
+ * then split into two parallel traces; pairs that cannot be coupled fall back to normal routing.
+ */
+export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult {
+  if (opts.lines || opts.coupled === false || !design.diffPairs.length) return routeCore(design, opts);
+  const pairs = routeDiffPairs(design, opts);
+  const withPairs: Design = { ...design, traces: [...design.traces, ...pairs.traces.map((t, i) => ({ ...t, id: `__pair${i}` }))] };
+  const rest = routeCore(withPairs, opts);
+  return { traces: [...pairs.traces, ...rest.traces], vias: rest.vias, routed: pairs.routed + rest.routed, failed: rest.failed, coupled: pairs.coupled };
+}
+
+function routeDiffPairs(design: Design, opts: RouteOptions) {
+  const out = { traces: [] as Omit<Trace, "id">[], routed: 0, coupled: [] as string[] };
+  let cur = design;
+  for (const pair of design.diffPairs) {
+    if (opts.nets && !opts.nets.includes(pair.positive) && !opts.nets.includes(pair.negative)) continue;
+    const analysis = analyzeCopper(cur);
+    const rats = ratsnest(cur, analysis);
+    const pos = rats.filter((r) => r.net === pair.positive);
+    const neg = rats.filter((r) => r.net === pair.negative);
+    const pitch = pair.width + pair.gap;
+    const padAt = (p: Vec): WorldPad | undefined => {
+      for (const it of analysis.items) if (it.kind === "pad" && Math.hypot(it.pad.world.x - p.x, it.pad.world.y - p.y) < 1e-6) return it.pad;
+      return undefined;
+    };
+    const padLayersAt = (p: Vec): CopperLayer[] => padAt(p)?.layers ?? [];
+    const cl = Math.max(netRules(cur, pair.positive).clearance, netRules(cur, pair.negative).clearance);
+    const fat = 2 * pair.width + pair.gap;
+    /** Coupling point just outside a pad pair, on the side facing `toward`. */
+    const breakout = (pp: Vec, nn: Vec, toward: Vec): Vec => {
+      const mid = { x: (pp.x + nn.x) / 2, y: (pp.y + nn.y) / 2 };
+      const vx = nn.x - pp.x;
+      const vy = nn.y - pp.y;
+      const vl = Math.hypot(vx, vy) || 1;
+      let dx = -vy / vl;
+      let dy = vx / vl;
+      if (dx * (toward.x - mid.x) + dy * (toward.y - mid.y) < 0) (dx = -dx), (dy = -dy);
+      const half = Math.max(...[padAt(pp), padAt(nn)].map((pd) => (pd ? Math.max(pd.ww, pd.wh) / 2 : 0)));
+      const d = half + cl + fat / 2 + 0.1;
+      return { x: Math.round((mid.x + dx * d) * 1e4) / 1e4, y: Math.round((mid.y + dy * d) * 1e4) / 1e4 };
+    };
+    const used = new Set<number>();
+    let any = false;
+    for (const p of pos) {
+      // Match the P connection with the N connection whose ends sit next to it.
+      let best = -1;
+      let bestCost = Infinity;
+      let flip = false;
+      neg.forEach((n, j) => {
+        if (used.has(j)) return;
+        const c1 = dist(p.a, n.a) + dist(p.b, n.b);
+        const c2 = dist(p.a, n.b) + dist(p.b, n.a);
+        if (Math.min(c1, c2) < bestCost) (bestCost = Math.min(c1, c2)), (best = j), (flip = c2 < c1);
+      });
+      if (best < 0) continue;
+      const n = neg[best];
+      const na = flip ? n.b : n.a;
+      const nb = flip ? n.a : n.b;
+      if (dist(p.a, na) > 4 * pitch + 2 || dist(p.b, nb) > 4 * pitch + 2) continue;
+      const boardLayers = copperLayers(cur.board);
+      const common = [p.a, na, p.b, nb].map(padLayersAt).reduce((acc, ls) => acc.filter((l) => ls.includes(l)), boardLayers);
+      if (!common.length) continue;
+      // The coupled run starts and ends just outside each pad pair; short breakouts join it to the pads.
+      const ca = breakout(p.a, na, { x: (p.b.x + nb.x) / 2, y: (p.b.y + nb.y) / 2 });
+      const cb = breakout(p.b, nb, { x: (p.a.x + na.x) / 2, y: (p.a.y + na.y) / 2 });
+      // A net of its own: the pair's pads are obstacles for the wide centreline, like everything else.
+      const r = routeCore(cur, { ...opts, nets: undefined, lines: [{ net: `__pair_${pair.name}`, a: ca, b: cb, layers: common }], forceWidth: fat, clearance: cl, allowVias: false });
+      if (r.failed.length || r.traces.length !== 1) continue;
+      // Extend the centreline back to each pad pair's midpoint so the breakout corners get proper mitres.
+      const centre = [{ x: (p.a.x + na.x) / 2, y: (p.a.y + na.y) / 2 }, ...r.traces[0].points, { x: (p.b.x + nb.x) / 2, y: (p.b.y + nb.y) / 2 }];
+      const split = splitPair(centre, p.a, na, p.b, nb, pitch / 2);
+      if (!split) continue;
+      const tP = { layer: r.traces[0].layer, width: pair.width, points: split.p };
+      const tN = { layer: r.traces[0].layer, width: pair.width, points: split.n };
+      if (!pairClear(cur, analysis, tP, tN, pair.positive, pair.negative, pair.gap)) continue;
+      out.traces.push(tP, tN);
+      out.routed += 2;
+      used.add(best);
+      any = true;
+      cur = { ...cur, traces: [...cur.traces, { ...tP, id: `__p${out.traces.length}` }, { ...tN, id: `__n${out.traces.length}` }] };
+    }
+    if (any) out.coupled.push(pair.name);
+  }
+  return out;
+}
+
+/** Offset a polyline sideways by d (positive = left of travel), with mitred corners. */
+export function offsetPolyline(pts: Vec[], d: number): Vec[] {
+  const n = pts.length;
+  const normal = (a: Vec, b: Vec) => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: -dy / len, y: dx / len };
+  };
+  return pts.map((p, i) => {
+    const n1 = normal(pts[Math.max(0, i - 1)], pts[Math.max(1, i)]);
+    const n2 = normal(pts[Math.min(n - 2, i)], pts[Math.min(n - 1, i + 1)]);
+    const mx = n1.x + n2.x;
+    const my = n1.y + n2.y;
+    const ml = Math.hypot(mx, my) || 1;
+    // Mitre length grows as 1/cos(θ/2); 45° and 90° corners stay well under 1.5×.
+    const scale = d / Math.max(0.35, (mx * n1.x + my * n1.y) / ml);
+    return { x: p.x + (mx / ml) * scale, y: p.y + (my / ml) * scale };
+  });
+}
+
+function splitPair(center: Vec[], pa: Vec, na: Vec, pb: Vec, nb: Vec, h: number): { p: Vec[]; n: Vec[] } | null {
+  if (center.length < 2) return null;
+  const side = (a: Vec, b: Vec, pp: Vec, nn: Vec) => {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    return Math.sign(-dy * (pp.x - nn.x) + dx * (pp.y - nn.y));
+  };
+  const s0 = side(center[0], center[1], pa, na);
+  const s1 = side(center[center.length - 2], center[center.length - 1], pb, nb);
+  // P must stay on the same side from end to end; a polarity swap needs a crossover, which we leave to the user.
+  if (!s0 || s0 !== s1) return null;
+  return { p: simplify([pa, ...offsetPolyline(center, s0 * h), pb]), n: simplify([na, ...offsetPolyline(center, -s0 * h), nb]) };
+}
+
+function pairClear(design: Design, analysis: ReturnType<typeof analyzeCopper>, tP: Omit<Trace, "id">, tN: Omit<Trace, "id">, pNet: string, nNet: string, pairGap: number): boolean {
+  const itP: CopperItem = { kind: "trace", key: "pairP", trace: { ...tP, id: "pairP" } };
+  const itN: CopperItem = { kind: "trace", key: "pairN", trace: { ...tN, id: "pairN" } };
+  if (copperGap(itP, itN) < pairGap - 1e-6) return false;
+  for (const [mine, net, partner] of [
+    [itP, pNet, nNet],
+    [itN, nNet, pNet],
+  ] as const) {
+    const cl = netRules(design, net).clearance;
+    for (const it of analysis.items) {
+      if (!sharedLayers(mine, it).length) continue;
+      const other = analysis.netOfItem(it);
+      if (other === net) continue;
+      // Partner pads keep full clearance; partner traces may run at the pair gap.
+      const need = other === partner && it.kind === "trace" ? pairGap : Math.max(cl, netRules(design, other).clearance);
+      if (copperGap(mine, it) < need - 1e-6) return false;
+    }
+  }
+  return true;
 }

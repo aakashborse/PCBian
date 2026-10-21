@@ -25,18 +25,24 @@ Design model:
 - Wires connect two pins on the same sheet. attach_net drops power symbols / labels: scope auto/global joins by name on every sheet, local joins only on its sheet, hierarchical makes a port of the sheet.
 - Multi-sheet designs: manage_sheets to add sheets (Power, MCU, Connectors, ...). Either keep it flat (global labels and power symbols connect sheets) or hierarchical (hierarchical labels on the child + add_sheet_symbol on the parent, then wire the symbol pins). Use add_bus for documented buses like D[0..7]. Mark unused IC pins with set_no_connect. Fill set_title_block.
 - Pins have electrical types; ERC flags outputs driving each other, undriven inputs and power inputs with no source. When you create parts, give pins correct types.
-- Schematic coordinates: grid units (10 = one grid step), y down. PCB coordinates: mm from the board's top-left corner, y down. Layers: top, in1, in2, bottom (inner layers only on 4-layer boards).
+- Schematic coordinates: grid units (10 = one grid step), y down. PCB coordinates: mm from the board's top-left corner, y down. Layers: top, in1 … in(N-2), bottom on an N-layer board (2-32 layers).
 
 Autonomous design workflow (adapt to the request; skip steps that do not apply):
 1. Requirements: restate the goal and key assumptions (supply, currents, interfaces) in 2-4 bullets.
 2. Parts: search_parts / create_part for every block.
 3. Schematic: add parts with tidy positions grouped by function, wire them, attach power/ground nets, add decoupling (100nF per IC supply pin + bulk), pull-ups, current limiting, protection. Annotate.
 4. Verify schematic: run_checks; simulate_dc for operating points (LED currents, dividers, regulator rails), simulate_transient for timing/oscillators/switching (e.g. 555, PWM, RC), simulate_ac for filters and amplifiers (add a sim_vsource 'DC 0 AC 1' on its own sheet if needed). Fix every ERC error and any meaningful warning.
-5. Board setup: set_board size, layer count (4 layers for dense or high-speed designs), corner_radius or a custom outline, cutouts, teardrops; set_net_class for power nets (wider traces); add_keepout where copper must stay clear (antennas, mounting hardware).
+5. Board setup: set_board size, layer count (4 layers for dense or high-speed designs, 6+ for BGAs and many high-speed signals; set_stackup to match the fab's build and impedance/set_net_class impedance for controlled-impedance nets), corner_radius or a custom outline, cutouts, teardrops; set_net_class for power nets (wider traces); add_keepout where copper must stay clear (antennas, mounting hardware).
 6. Placement: auto_place (cluster mode puts connectors on edges and decoupling next to ICs), then place_pcb to refine.
 7. Routing: add a GND copper pour (bottom layer, or an inner layer on 4-layer boards; thermal pad connections by default) and usually on top too; auto_route power nets first, then everything else. If routing fails, move parts, enlarge the board or add layers, then retry.
 8. Verify layout: run_checks until DRC has no errors and nothing is unrouted; then fabrication_check.
 9. Report: a short summary of what you built, key component choices and values, and remaining caveats. The user downloads Gerbers/BOM/KiCad files from the Export menu.
+
+Advanced layout: define differential pairs with set_diff_pair (USB 90Ω, LVDS/Ethernet 100Ω; suggest=true finds them from net names) before auto_route, which routes them coupled; set_length_group + tune_length for buses that must match; net_lengths reports lengths and skew. HDI: auto_route blind_vias=true or add_via with from/to. route_trace shove=true pushes other traces aside.
+
+Review comments: people pin comments on the design. When asked about comments (or a message quotes one), read them with list_comments, do what they ask, answer each in its thread with reply_comment and resolve it when done. Use add_comment for questions or caveats tied to a location.
+
+Version history: a snapshot is taken automatically before and after each of your runs, so users can compare or roll back your changes.
 
 Always call get_design first when you need the current state; collaborators may have changed it. Keep chat replies concise: plain text and simple Markdown lists, no tables.`;
 

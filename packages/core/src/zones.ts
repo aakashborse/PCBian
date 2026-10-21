@@ -23,15 +23,19 @@ export interface ZoneFill {
   removed: Rect[];
   /** For each surviving island, the keys of same-net items it connects. */
   islands: string[][];
+  /** Hatched fill: square holes of side `gap` on a (width + gap) pitch, axis-aligned from the zone's bbox origin. */
+  hatch?: { width: number; gap: number; origin: Vec };
+  /** Solid copper kept around same-net pads/vias in hatched fills so they always join the mesh. */
+  halos: Cutout[];
 }
 
 /** Minimal copper item view needed by the filler. */
 export type FillItem =
   | { kind: "pad"; key: string; pad: WorldPad }
   | { kind: "trace"; key: string; trace: Trace }
-  | { kind: "via"; key: string; via: Via };
+  | { kind: "via"; key: string; via: Via; layers: CopperLayer[] };
 
-const onLayer = (it: FillItem, l: CopperLayer) => (it.kind === "pad" ? it.pad.layers.includes(l) : it.kind === "trace" ? it.trace.layer === l : true);
+const onLayer = (it: FillItem, l: CopperLayer) => (it.kind === "pad" ? it.pad.layers.includes(l) : it.kind === "trace" ? it.trace.layer === l : it.layers.includes(l));
 
 export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], netOf: (it: FillItem) => string | undefined): ZoneFill {
   const zr = netRules(design, zone.net);
@@ -54,6 +58,13 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
     cutouts.push({ kind: "line", points: [...h, h[0]], width: edgeClear * 2 });
   }
   for (const k of design.keepouts) if (k.noPours && k.layers.includes(zone.layer)) cutouts.push({ kind: "polygon", points: k.points });
+  // Higher-priority pours of other nets win where they overlap, with clearance around them.
+  for (const z2 of design.zones) {
+    if (z2.id === zone.id || z2.layer !== zone.layer || z2.net === zone.net || (z2.priority ?? 0) <= (zone.priority ?? 0)) continue;
+    const cl = Math.max(zr.clearance, netRules(design, z2.net).clearance);
+    cutouts.push({ kind: "polygon", points: z2.points });
+    cutouts.push({ kind: "line", points: [...z2.points, z2.points[0]], width: cl * 2 });
+  }
 
   for (const it of items) {
     if (!onLayer(it, zone.layer)) continue;
@@ -186,7 +197,22 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
     if (members.size || !removeIslands) islands.push([...members]);
     else for (const c of cells) removedCells.push(c);
   }
-  return { zone, cutouts, spokes, clip: foreign, removed: cellsToRects(removedCells, nx, res, bx0, by0), islands };
+  let hatch: ZoneFill["hatch"];
+  const halos: Cutout[] = [];
+  if (zone.fill === "hatch") {
+    const width = zone.hatchWidth ?? Math.max(0.25, zr.traceWidth);
+    const gap = zone.hatchGap ?? 1;
+    hatch = { width, gap, origin: { x: Math.min(...zone.points.map((p) => p.x)), y: Math.min(...zone.points.map((p) => p.y)) } };
+    // A ring of solid copper (one hatch width beyond the thermal gap) around every same-net pad and via.
+    for (const it of same) {
+      if (it.kind === "pad") {
+        const r = padRect(it.pad);
+        const m = (thermal ? gapT : 0) + width;
+        halos.push({ kind: "rect", rect: { x0: r.x0 - m, y0: r.y0 - m, x1: r.x1 + m, y1: r.y1 + m } });
+      } else if (it.kind === "via") halos.push({ kind: "circle", c: it.via, r: it.via.diameter / 2 + width });
+    }
+  }
+  return { zone, cutouts, spokes, clip: foreign, removed: cellsToRects(removedCells, nx, res, bx0, by0), islands, hatch, halos };
 }
 
 /** Merge raster cells into rectangles (row runs, then stacked identical runs). */
@@ -253,7 +279,7 @@ export function teardrops(
       const q = pts[end === 0 ? 1 : pts.length - 2];
       for (const a of anchors) {
         const isPad = a.kind === "pad";
-        if (isPad ? !a.pad.layers.includes(t.trace.layer) : false) continue;
+        if (!(isPad ? a.pad.layers : a.layers).includes(t.trace.layer)) continue;
         const c = isPad ? a.pad.world : a.via;
         const size = isPad ? Math.min(a.pad.ww, a.pad.wh) : a.via.diameter;
         if (Math.hypot(p.x - c.x, p.y - c.y) > size / 2 + 1e-6) continue;
@@ -279,6 +305,39 @@ export function teardrops(
           ],
         });
       }
+    }
+  }
+  return out;
+}
+
+/**
+ * Square holes of a hatched fill, kept only where the whole hole lies inside the zone outline
+ * at least one hatch width from its edge (so the fill keeps a solid border).
+ */
+export function hatchHoles(fill: ZoneFill): Rect[] {
+  if (!fill.hatch) return [];
+  const { width, gap, origin } = fill.hatch;
+  const pitch = width + gap;
+  const poly = fill.zone.points;
+  const xs = poly.map((p) => p.x);
+  const ys = poly.map((p) => p.y);
+  const x1 = Math.max(...xs);
+  const y1 = Math.max(...ys);
+  const edges = poly.map((p, i) => [p, poly[(i + 1) % poly.length]] as [Vec, Vec]);
+  const out: Rect[] = [];
+  for (let y = origin.y + width; y + gap <= y1 - width + 1e-9; y += pitch) {
+    for (let x = origin.x + width; x + gap <= x1 - width + 1e-9; x += pitch) {
+      const r = { x0: x, y0: y, x1: x + gap, y1: y + gap };
+      const corners = [
+        { x: r.x0, y: r.y0 },
+        { x: r.x1, y: r.y0 },
+        { x: r.x1, y: r.y1 },
+        { x: r.x0, y: r.y1 },
+      ];
+      if (!corners.every((c) => pointInPolygon(c, poly))) continue;
+      const c = { x: x + gap / 2, y: y + gap / 2 };
+      if (edges.some(([a, b]) => pointSegmentDistance(c, a, b) < gap / 2 + width - 1e-9)) continue;
+      out.push(r);
     }
   }
   return out;

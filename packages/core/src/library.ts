@@ -97,16 +97,20 @@ export function icSymbol(left: [string, string][], right: [string, string][], la
   return { shapes, pins, refPos: { x: -halfW, y: top - 6 }, valuePos: { x: -halfW, y: top + h + 12 } };
 }
 
-function transistorSymbol(kind: "npn" | "nmos"): PartSymbol {
+function transistorSymbol(kind: "npn" | "pnp" | "nmos" | "pmos"): PartSymbol {
+  const bjt = kind === "npn" || kind === "pnp";
   const shapes: Shape[] =
-    kind === "npn"
+    bjt
       ? [
           { kind: "circle", x: 5, y: 0, r: 16 },
           { kind: "line", points: [{ x: -20, y: 0 }, { x: -2, y: 0 }] },
           { kind: "line", points: [{ x: -2, y: -10 }, { x: -2, y: 10 }] },
           { kind: "line", points: [{ x: -2, y: -4 }, { x: 10, y: -14 }, { x: 10, y: -20 }] },
           { kind: "line", points: [{ x: -2, y: 4 }, { x: 10, y: 14 }, { x: 10, y: 20 }] },
-          { kind: "polygon", points: [{ x: 10, y: 14 }, { x: 3, y: 13 }, { x: 7, y: 8 }], fill: true },
+          // Emitter arrow: out of the base for NPN, into it for PNP.
+          kind === "npn"
+            ? { kind: "polygon", points: [{ x: 10, y: 14 }, { x: 3, y: 13 }, { x: 7, y: 8 }], fill: true }
+            : { kind: "polygon", points: [{ x: -1, y: 5 }, { x: 6, y: 6 }, { x: 3, y: 11 }], fill: true },
         ]
       : [
           { kind: "circle", x: 5, y: 0, r: 16 },
@@ -115,8 +119,12 @@ function transistorSymbol(kind: "npn" | "nmos"): PartSymbol {
           { kind: "line", points: [{ x: -1, y: -8 }, { x: 10, y: -8 }, { x: 10, y: -20 }] },
           { kind: "line", points: [{ x: -1, y: 8 }, { x: 10, y: 8 }, { x: 10, y: 20 }] },
           { kind: "line", points: [{ x: -1, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 8 }] },
+          // Body-diode arrow on the channel: into it for N-channel, out of it for P-channel.
+          kind === "nmos"
+            ? { kind: "polygon", points: [{ x: 0, y: 0 }, { x: 6, y: -3 }, { x: 6, y: 3 }], fill: true }
+            : { kind: "polygon", points: [{ x: 7, y: 0 }, { x: 1, y: -3 }, { x: 1, y: 3 }], fill: true },
         ];
-  const names = kind === "npn" ? { b: "B", c: "C", e: "E" } : { b: "G", c: "D", e: "S" };
+  const names = bjt ? { b: "B", c: "C", e: "E" } : { b: "G", c: "D", e: "S" };
   // SOT-23 pinout: 1 = B/G, 2 = E/S, 3 = C/D
   return {
     shapes,
@@ -213,6 +221,8 @@ export const PARTS: PartDef[] = [
   part({ id: "diode_sod123", name: "Diode (SOD-123)", category: "Discrete", refPrefix: "D", defaultValue: "1N4148W", mpn: "1N4148W", symbol: diodeSymbol(), footprint: fp.sod123(), description: "Small-signal switching diode. Pin 1 = K, pin 2 = A.", keywords: ["diode", "rectifier", "signal"] }),
   part({ id: "schottky_sod123", name: "Schottky Diode (SOD-123)", category: "Discrete", refPrefix: "D", defaultValue: "SS14", mpn: "B5819W", symbol: diodeSymbol([{ kind: "line", points: [{ x: 8, y: -9 }, { x: 12, y: -9 }] }, { kind: "line", points: [{ x: 8, y: 9 }, { x: 4, y: 9 }] }]), footprint: fp.sod123(), description: "1A 40V Schottky diode, reverse-polarity protection. Pin 1 = K.", keywords: ["schottky", "diode", "protection"] }),
   part({ id: "npn_sot23", name: "NPN Transistor (SOT-23)", category: "Discrete", refPrefix: "Q", defaultValue: "MMBT3904", mpn: "MMBT3904", symbol: transistorSymbol("npn"), footprint: fp.sot23(), description: "General purpose NPN BJT, 40V 200mA. Pins: 1=B, 2=E, 3=C.", keywords: ["transistor", "bjt", "npn", "switch"] }),
+  part({ id: "pnp_sot23", name: "PNP Transistor (SOT-23)", category: "Discrete", refPrefix: "Q", defaultValue: "MMBT3906", mpn: "MMBT3906", symbol: transistorSymbol("pnp"), footprint: fp.sot23(), description: "General purpose PNP BJT, -40V -200mA. Pins: 1=B, 2=E, 3=C.", keywords: ["transistor", "bjt", "pnp", "high-side", "switch"] }),
+  part({ id: "pmos_sot23", name: "P-MOSFET (SOT-23)", category: "Discrete", refPrefix: "Q", defaultValue: "AO3401A", mpn: "AO3401A", symbol: transistorSymbol("pmos"), footprint: fp.sot23(), description: "Logic-level P-channel MOSFET, -30V -4A, for high-side switching and reverse-polarity protection. Pins: 1=G, 2=S, 3=D.", keywords: ["mosfet", "fet", "pmos", "high-side", "load switch", "transistor"] }),
   part({ id: "nmos_sot23", name: "N-MOSFET (SOT-23)", category: "Discrete", refPrefix: "Q", defaultValue: "AO3400A", mpn: "AO3400A", symbol: transistorSymbol("nmos"), footprint: fp.sot23(), description: "Logic-level N-channel MOSFET, 30V 5.7A. Pins: 1=G, 2=S, 3=D.", keywords: ["mosfet", "fet", "nmos", "switch", "transistor"] }),
   part({ id: "button_6mm", name: "Push Button (6mm THT)", category: "Electromechanical", refPrefix: "SW", defaultValue: "SW_Push", symbol: twoPin(switchBody), footprint: fp.tactSwitch6mm(), description: "6x6mm tactile push button, normally open.", keywords: ["button", "switch", "tactile", "reset"] }),
   part({ id: "crystal_hc49", name: "Crystal (HC-49)", category: "Frequency", refPrefix: "Y", defaultValue: "16MHz", symbol: twoPin(crystalBody), footprint: fp.hc49(), description: "Quartz crystal, HC-49/U through-hole. Needs two load capacitors (typ. 22pF) to GND.", keywords: ["crystal", "oscillator", "xtal", "clock"] }),

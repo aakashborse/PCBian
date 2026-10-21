@@ -3,9 +3,11 @@ import { courtyardRect, padsOf, toWorld } from "./geometry";
 import { getPart } from "./library";
 import { computeNets } from "./netlist";
 import { analyzeCopper, boardTeardrops, zoneFill, type Cutout } from "./copper";
-import { boardOutline, copperLayers } from "./doc";
+import { boardOutline } from "./doc";
+import { copperLayers, layerLabel, stackupOf, stackupThickness, viaKind, viaLayers } from "./stackup";
 import { strokeText } from "./font";
-import type { ComponentData, CopperLayer, Design, Shape, Side, Vec } from "./types";
+import { hatchHoles } from "./zones";
+import type { ComponentData, CopperLayer, Design, Shape, Side, Vec, Via } from "./types";
 
 export function bomCsv(design: Design): string {
   const groups = new Map<string, { refs: string[]; value: string; part: string; footprint: string; mpn: string }>();
@@ -98,7 +100,7 @@ class Gerber {
 
 const circlePts = (c: Vec, r: number, n = 24): Vec[] => Array.from({ length: n + 1 }, (_, i) => ({ x: c.x + r * Math.cos((2 * Math.PI * i) / n), y: c.y + r * Math.sin((2 * Math.PI * i) / n) }));
 
-function silkPolylines(shape: Shape, comp: ComponentData): Vec[][] {
+export function silkPolylines(shape: Shape, comp: ComponentData): Vec[][] {
   const mirror = comp.pcb.side === "bottom";
   const w = (p: Vec) => toWorld(p, comp.pcb, mirror);
   switch (shape.kind) {
@@ -117,12 +119,9 @@ function silkPolylines(shape: Shape, comp: ComponentData): Vec[][] {
   }
 }
 
-const LAYER_FILE: Record<CopperLayer, { tag: string; ext: string }> = {
-  top: { tag: "F_Cu", ext: "gtl" },
-  in1: { tag: "In1_Cu", ext: "g2" },
-  in2: { tag: "In2_Cu", ext: "g3" },
-  bottom: { tag: "B_Cu", ext: "gbl" },
-};
+/** Gerber file naming in the usual Protel/KiCad style: gtl, g2, g3 … gbl. */
+const layerFile = (l: CopperLayer): { tag: string; ext: string } =>
+  l === "top" ? { tag: "F_Cu", ext: "gtl" } : l === "bottom" ? { tag: "B_Cu", ext: "gbl" } : { tag: `In${l.slice(2)}_Cu`, ext: `g${Number(l.slice(2)) + 1}` };
 
 export function gerberFiles(design: Design): Record<string, string> {
   const H = design.board.height;
@@ -147,6 +146,13 @@ export function gerberFiles(design: Design): Record<string, string> {
       };
       cu.polarity(true);
       cu.region(z.points);
+      if (fill.hatch) {
+        // Hatched pour: punch the mesh holes, then restore solid copper around same-net pads and vias.
+        cu.polarity(false);
+        for (const r of hatchHoles(fill)) clear({ kind: "rect", rect: r });
+        cu.polarity(true);
+        fill.halos.forEach(clear);
+      }
       cu.polarity(false);
       fill.cutouts.forEach(clear);
       cu.polarity(true);
@@ -164,8 +170,8 @@ export function gerberFiles(design: Design): Record<string, string> {
       }
     }
     for (const t of design.traces) if (t.layer === layer) cu.polyline(t.width, t.points);
-    for (const v of design.vias) cu.flash("C", v.diameter, v.diameter, v);
-    files[`${design.name}-${LAYER_FILE[layer].tag}.${LAYER_FILE[layer].ext}`] = cu.toString();
+    for (const v of design.vias) if (viaLayers(design.board, v).includes(layer)) cu.flash("C", v.diameter, v.diameter, v);
+    files[`${design.name}-${layerFile(layer).tag}.${layerFile(layer).ext}`] = cu.toString();
   });
 
   for (const side of ["top", "bottom"] as Side[]) {
@@ -198,7 +204,7 @@ export function gerberFiles(design: Design): Record<string, string> {
   const edge = new Gerber("Profile,NP", H);
   for (const poly of [boardOutline(design.board), ...(design.board.cutouts ?? [])]) edge.polyline(0.1, [...poly, poly[0]]);
   files[`${design.name}-Edge_Cuts.gm1`] = edge.toString();
-  files[`${design.name}.drl`] = excellon(design);
+  Object.assign(files, drillFiles(design));
   files[`${design.name}-fab-notes.txt`] = fabNotes(design);
   return files;
 }
@@ -213,24 +219,72 @@ export function fabNotes(design: Design): string {
     `Board size: ${b.width} x ${b.height} mm, ${b.layers} copper layers, ${b.thickness} mm FR-4`,
     `Minimum trace/space: ${Math.min(b.defaultTraceWidth, ...design.netClasses.map((c) => c.traceWidth))} / ${Math.min(b.clearance, ...design.netClasses.map((c) => c.clearance))} mm`,
     `Drill sizes: ${[...holes].sort().join(", ") || "none"} mm`,
-    `Finish: HASL lead-free (default), green soldermask, white silkscreen, 1 oz copper`,
-    `Layer stack: ${copperLayers(b).join(" / ")}`,
+    `Finish: HASL lead-free (default), green soldermask, white silkscreen`,
+    `Layer stack (top to bottom):`,
+    ...stackupLines(b),
+    ...viaSpanLines(design),
+    ...(design.diffPairs.length || design.netClasses.some((c) => c.impedance) ? ["Controlled impedance: see net classes / differential pairs; fabricator to adjust widths to meet targets within ±10%"] : []),
     "",
   ].join("\n");
 }
 
-export function excellon(design: Design): string {
+function stackupLines(b: Design["board"]): string[] {
+  const s = stackupOf(b);
+  const layers = copperLayers(b);
+  const out: string[] = [];
+  layers.forEach((l, i) => {
+    out.push(`  L${i + 1} ${layerLabel(l)}: ${s.copperOz[i]} oz copper`);
+    const d = s.dielectrics[i];
+    if (d) out.push(`     ${d.kind} ${d.thickness.toFixed(3)} mm, er ${d.er}`);
+  });
+  out.push(`  Total ≈ ${stackupThickness(s).toFixed(2)} mm (nominal ${b.thickness} mm)`);
+  return out;
+}
+
+function viaSpanLines(design: Design): string[] {
+  const spans = new Map<string, number>();
+  for (const v of design.vias) {
+    const k = viaKind(design.board, v);
+    if (k === "through") continue;
+    const span = viaLayers(design.board, v);
+    const key = `${k} via ${layerLabel(span[0])} - ${layerLabel(span[span.length - 1])}`;
+    spans.set(key, (spans.get(key) ?? 0) + 1);
+  }
+  return [...spans].map(([k, n]) => `${k[0].toUpperCase() + k.slice(1)}: ${n}`);
+}
+
+/** Excellon drill files: one for through holes, plus one per blind/buried/micro via span. */
+export function drillFiles(design: Design): Record<string, string> {
+  const files: Record<string, string> = { [`${design.name}.drl`]: excellon(design) };
+  const all = copperLayers(design.board);
+  const spans = new Map<string, Via[]>();
+  for (const v of design.vias) {
+    if (viaKind(design.board, v) === "through") continue;
+    const span = viaLayers(design.board, v);
+    const key = `L${all.indexOf(span[0]) + 1}-L${all.indexOf(span[span.length - 1]) + 1}`;
+    if (!spans.has(key)) spans.set(key, []);
+    spans.get(key)!.push(v);
+  }
+  for (const [key, vias] of spans) files[`${design.name}-${key}.drl`] = excellon(design, vias, key);
+  return files;
+}
+
+/** Excellon for the through holes (pads and through vias), or for a given set of span vias. */
+export function excellon(design: Design, only?: Via[], span?: string): string {
   const holes = new Map<string, Vec[]>();
   const add = (d: number, p: Vec) => {
     const k = d.toFixed(3);
     if (!holes.has(k)) holes.set(k, []);
     holes.get(k)!.push(p);
   };
-  for (const c of design.components) for (const p of padsOf(c)) if (p.drill) add(p.drill, p.world);
-  for (const v of design.vias) add(v.drill, v);
+  if (only) for (const v of only) add(v.drill, v);
+  else {
+    for (const c of design.components) for (const p of padsOf(c)) if (p.drill) add(p.drill, p.world);
+    for (const v of design.vias) if (viaKind(design.board, v) === "through") add(v.drill, v);
+  }
   const H = design.board.height;
   const tools = [...holes.keys()];
-  const out = ["M48", "METRIC,TZ", ...tools.map((d, i) => `T${i + 1}C${d}`), "%", "G90", "G05"];
+  const out = ["M48", `; ${span ? `Layer pair ${span}` : "Plated through holes"}`, "METRIC,TZ", ...tools.map((d, i) => `T${i + 1}C${d}`), "%", "G90", "G05"];
   tools.forEach((d, i) => {
     out.push(`T${i + 1}`);
     for (const p of holes.get(d)!) out.push(`X${p.x.toFixed(3)}Y${(H - p.y).toFixed(3)}`);

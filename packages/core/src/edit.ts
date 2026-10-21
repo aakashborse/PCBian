@@ -48,7 +48,7 @@ export function disconnectPin(doc: Y.Doc, spec: string): number {
 
 const SIDE_DIR: Record<string, Vec> = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
 
-const isPowerName = (n: string) => /^(A|D|P)?GND|^VSS$|^[+-]?\d+(\.\d+)?V\d*$|^[+-]?\d+V\d+$|^V(CC|DD|BUS|IN|BAT|SYS)\b|^\+/i.test(n.trim());
+export const isPowerName = (n: string) => /^(A|D|P)?GND|^VSS$|^[+-]?\d+(\.\d+)?V\d*$|^[+-]?\d+V\d+$|^V(CC|DD|BUS|IN|BAT|SYS)\b|^\+/i.test(n.trim());
 
 export type LabelScope = "auto" | "power" | "global" | "local" | "hierarchical";
 

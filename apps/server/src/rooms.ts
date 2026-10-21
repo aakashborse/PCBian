@@ -10,6 +10,7 @@ import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as Y from "yjs";
 import { projectFile } from "./store.js";
+import { noteChange } from "./versions.js";
 
 const MSG_SYNC = 0;
 const MSG_AWARENESS = 1;
@@ -31,6 +32,7 @@ export class Room {
       syncProtocol.writeUpdate(enc, update);
       this.broadcast(encoding.toUint8Array(enc));
       this.scheduleSave();
+      noteChange(this);
     });
 
     this.awareness.on("update", ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
