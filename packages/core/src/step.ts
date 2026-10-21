@@ -6,7 +6,8 @@ import { getPart } from "./library";
 import { modelPlacement, parseStep, renumber, stepRoot, type StepData } from "./model3d";
 import type { ComponentData, Design, Model3D, Vec } from "./types";
 
-type V3 = [number, number, number];
+export type StepV3 = [number, number, number];
+type V3 = StepV3;
 
 class StepWriter {
   private lines: string[] = [];
@@ -144,7 +145,17 @@ function circle(c: Vec, r: number, n = 16): Vec[] {
  * footprint has a model, with that file's text in `models` (by file id), are placed as instances of
  * the model and the file becomes an assembly; other parts are boxes on the board.
  */
-export function stepFile(design: Design, models: Record<string, string> = {}): string {
+export interface StepSolid {
+  name: string;
+  /** Outline in the STEP frame (mm, y up), extruded from z0 to z1. */
+  outer: Vec[];
+  holes?: Vec[][];
+  z0: number;
+  z1: number;
+  rgb: V3;
+}
+
+export function stepFile(design: Design, models: Record<string, string> = {}, opts: { extra?: StepSolid[]; boardless?: boolean } = {}): string {
   const w = new StepWriter();
   const H = design.board.height;
   const T = design.board.thickness;
@@ -154,9 +165,10 @@ export function stepFile(design: Design, models: Record<string, string> = {}): s
   const holes: Vec[][] = [];
   for (const c of design.components) for (const p of padsOf(c)) if (p.drill && p.drill >= 0.5) holes.push(circle(flip(p.world), p.drill / 2));
   const solids: { id: number; rgb: V3 }[] = [];
-  solids.push({ id: prism(w, "PCB", boardOutline(design.board).map(flip), [...(design.board.cutouts ?? []).map((h) => h.map(flip)), ...holes], 0, T), rgb: [0.05, 0.32, 0.2] });
+  if (!opts.boardless) solids.push({ id: prism(w, "PCB", boardOutline(design.board).map(flip), [...(design.board.cutouts ?? []).map((h) => h.map(flip)), ...holes], 0, T), rgb: [0.05, 0.32, 0.2] });
+  for (const x of opts.extra ?? []) solids.push({ id: prism(w, x.name, x.outer, x.holes ?? [], x.z0, x.z1), rgb: x.rgb });
   const placed: { c: ComponentData; m: Model3D }[] = [];
-  for (const c of design.components) {
+  for (const c of opts.boardless ? [] : design.components) {
     const part = getPart(c.partId);
     if (!part?.footprint || c.dnp) continue;
     const m = part.footprint.model;

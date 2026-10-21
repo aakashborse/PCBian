@@ -1,6 +1,8 @@
 // Copilot tools. Each tool validates its input with zod and edits the shared Yjs
 // document through @pcbian/core, so AI edits behave exactly like human edits.
 import {
+  enclosure,
+  setEnclosure,
   panelize,
   signalIntegrity,
   irDrop,
@@ -726,6 +728,18 @@ export const TOOLS = {
       return { ref: c.ref, pins: getPart(sheetPartId(child))!.symbol.pins.map((p) => p.id) };
     },
     label: ({ child_sheet }) => `Sheet symbol for ${child_sheet}`,
+  }),
+  design_enclosure: tool({
+    description:
+      "Design a two-part enclosure (base and lid) around the board: walls at a clearance, standoffs under mounting holes, headroom over the tallest part, and wall openings for parts at the board edge (connectors). Saves the settings with the design (show=true displays it in the 3D view) and reports the outside size, openings and problems. The user downloads it from Export > Enclosure.",
+    schema: z.object({ wall: z.number().positive().default(2), clearance: z.number().nonnegative().default(0.5), standoff: z.number().positive().default(4), headroom: z.number().nonnegative().default(2), show: z.boolean().default(true) }),
+    run: (doc, i) => {
+      setEnclosure(doc, i);
+      const e = enclosure(getDesign(doc), i);
+      const r = (v: number) => Math.round(v * 10) / 10;
+      return { outside_mm: [r(e.outer.x1 - e.outer.x0), r(e.outer.y1 - e.outer.y0), r(e.outer.z1 - e.outer.z0)], tallest_part_mm: r(e.tallest), standoffs: e.standoffs.length, openings: e.cutouts.map((c) => ({ ref: c.ref, wall: c.side, width: r(c.a1 - c.a0), height: r(c.z1 - c.z0) })), warnings: e.warnings };
+    },
+    label: () => "Design enclosure",
   }),
   plan_panel: tool({
     description:

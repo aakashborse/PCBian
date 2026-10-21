@@ -23,6 +23,7 @@ const Board3D = lazy(() => import("./Board3D").then((m) => ({ default: m.Board3D
 const Simulation = lazy(() => import("./Simulation").then((m) => ({ default: m.Simulation })));
 const Analysis = lazy(() => import("./Analysis").then((m) => ({ default: m.Analysis })));
 const PanelDialog = lazy(() => import("./PanelDialog").then((m) => ({ default: m.PanelDialog })));
+const EnclosureDialog = lazy(() => import("./EnclosureDialog").then((m) => ({ default: m.EnclosureDialog })));
 const exporters = () => import("./exporters").then((m) => m.exporters);
 const Loading = () => <div className="hint">Loading…</div>;
 
@@ -40,7 +41,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const [placing, setPlacing] = useState<string | null>(null);
   const [focus, setFocus] = useState<FocusRequest | null>(null);
   const [tab, setTab] = useState<RightTab>("copilot");
-  const [dialog, setDialog] = useState<"panel" | null>(null);
+  const [dialog, setDialog] = useState<"panel" | "enclosure" | null>(null);
   const [toastMsg, setToastMsg] = useState("");
   const [menu, setMenu] = useState(false);
   const [copilot, setCopilot] = useState<boolean | null>(null);
@@ -202,6 +203,7 @@ export function Editor({ projectId }: { projectId: string }) {
                     ["Schematic (.svg)", async () => (await exporters()).svg(design)],
                     ["Assembly drawing (.pdf)", async () => (await exporters()).assemblyPdf(design)],
                     ["3D model (.step)", async () => (await exporters()).step(design)],
+                    ["Enclosure (.step)…", async () => setDialog("enclosure")],
                     ["IPC-2581 (.xml)", async () => (await exporters()).ipc2581(design)],
                     ["ODB++ (.zip)", async () => (await exporters()).odb(design)],
                     ["Bill of materials (.csv)", async () => (await exporters()).bom(design)],
@@ -288,6 +290,11 @@ export function Editor({ projectId }: { projectId: string }) {
       {dialog === "panel" && (
         <Suspense fallback={null}>
           <PanelDialog onClose={() => setDialog(null)} onExport={async (o) => (await exporters()).panel(design, o)} />
+        </Suspense>
+      )}
+      {dialog === "enclosure" && (
+        <Suspense fallback={null}>
+          <EnclosureDialog onClose={() => setDialog(null)} onExport={async (o, b) => (await exporters()).enclosure(design, o, b)} />
         </Suspense>
       )}
       {importReport && (

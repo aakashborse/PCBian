@@ -1,4 +1,4 @@
-import { boardOutline, copperLayers, getPart, modelPlacement, padsOf, type ComponentData, type CopperLayer } from "@pcbian/core";
+import { boardOutline, copperLayers, enclosure, getPart, modelPlacement, padsOf, type ComponentData, type CopperLayer } from "@pcbian/core";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -268,6 +268,27 @@ export function Board3D() {
         cap.position.set(c.pcb.x, base + dir * (st.h + 0.75), c.pcb.y);
         g.add(cap);
       }
+    }
+
+    // The enclosure, when shown: see-through so the board stays visible. Its solids are in the STEP
+    // frame (y up, board bottom at z = 0); the view has y up from the top surface and z = board y.
+    if (design.enclosure?.show) {
+      const e = enclosure(design, design.enclosure);
+      const toView = (z0: number) => new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, z0 - T, 0, -1, 0, design.board.height, 0, 0, 0, 1);
+      const baseMat = mat(0xc4c9d1, { transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide });
+      const lidMat = mat(0x9aa3ad, { transparent: true, opacity: 0.18, depthWrite: false, side: THREE.DoubleSide });
+      for (const [solids, m] of [
+        [e.base, baseMat],
+        [e.lid, lidMat],
+      ] as const)
+        for (const sd of solids) {
+          const shape = new THREE.Shape(sd.outer.map((p) => new THREE.Vector2(p.x, p.y)));
+          for (const h of sd.holes ?? []) shape.holes.push(new THREE.Path(h.map((p) => new THREE.Vector2(p.x, p.y))));
+          const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: sd.z1 - sd.z0, bevelEnabled: false, curveSegments: 12 }), m);
+          mesh.matrixAutoUpdate = false;
+          mesh.matrix.copy(toView(sd.z0));
+          g.add(mesh);
+        }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [design, modelsLoaded]);

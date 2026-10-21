@@ -1,4 +1,4 @@
-import { panelFiles, type PanelOptions, assemblyPdf, bomCsv, gerberFiles, ipc2581, kicadNetlist, kicadPcb, netlistText, odbFiles, pickAndPlaceCsv, schematicPdf, schematicSvgs, stepFile, type Design } from "@pcbian/core";
+import { enclosureStep, type EnclosureOptions, panelFiles, type PanelOptions, assemblyPdf, bomCsv, gerberFiles, ipc2581, kicadNetlist, kicadPcb, netlistText, odbFiles, pickAndPlaceCsv, schematicPdf, schematicSvgs, stepFile, type Design } from "@pcbian/core";
 import JSZip from "jszip";
 import { designModels } from "../lib/models";
 
@@ -47,6 +47,10 @@ export const exporters = {
     zip.file(`${named.name}-schematic.pdf`, schematicPdf(d));
     zip.file(`${named.name}-assembly.pdf`, assemblyPdf(d));
     download(`${named.name}-fabrication.zip`, await zip.generateAsync({ type: "blob" }));
+  },
+  /** Enclosure base and lid (and the board with its models) as STEP. */
+  async enclosure(d: Design, opts: EnclosureOptions, withBoard: boolean) {
+    download(`${safe(d.name)}-enclosure.step`, new Blob([enclosureStep(d, opts, withBoard, withBoard ? await designModels(d) : {})], { type: "model/step" }));
   },
   /** Panel fabrication files: Gerbers, drills (plated and non-plated), V-score, panel placement. */
   async panel(d: Design, opts: PanelOptions) {

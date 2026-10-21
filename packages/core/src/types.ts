@@ -427,6 +427,8 @@ export interface Design {
   comments: DesignComment[];
   spiceModels: SpiceModel[];
   spiceSubckts: SpiceSubckt[];
+  /** Enclosure settings (wall, clearance, standoff, headroom...), when one has been designed. */
+  enclosure?: { wall?: number; clearance?: number; standoff?: number; headroom?: number; edgeReach?: number; openingMargin?: number; show?: boolean };
   variants: Variant[];
   /** Active variant name; "" means the base design. */
   activeVariant: string;

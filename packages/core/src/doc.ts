@@ -117,6 +117,7 @@ export function getDesign(doc: Y.Doc): Design {
     comments: [...commentsMap(doc).values()].sort((a, b) => a.createdAt - b.createdAt),
     spiceModels: (m.get("spiceModels") as SpiceModel[] | undefined) ?? [],
     spiceSubckts: (m.get("spiceSubckts") as SpiceSubckt[] | undefined) ?? [],
+    ...(m.get("enclosure") ? { enclosure: m.get("enclosure") as Design["enclosure"] } : {}),
     rules: (m.get("rules") as string | undefined) ?? "",
     variants,
     activeVariant: v ? activeVariant : "",
@@ -518,6 +519,11 @@ export function addSchGraphic(doc: Y.Doc, g: Omit<SchGraphic, "id">): SchGraphic
   return gr;
 }
 export const deleteSchGraphic = (doc: Y.Doc, id: string) => schGraphicsMap(doc).delete(id);
+
+export function setEnclosure(doc: Y.Doc, e: Design["enclosure"] | null) {
+  if (e) meta(doc).set("enclosure", e);
+  else meta(doc).delete("enclosure");
+}
 
 export function setTitleBlock(doc: Y.Doc, patch: Partial<TitleBlock>) {
   meta(doc).set("titleBlock", { ...DEFAULT_TITLE, ...((meta(doc).get("titleBlock") as Partial<TitleBlock>) ?? {}), ...patch });
