@@ -2,6 +2,11 @@ import {
   addTrace,
   addComment,
   shoveTrace,
+  getDesign,
+  shoveVia,
+  viasMap,
+  type ShoveResult,
+  type Design,
   layerLabel,
   viaKind,
   viaLayers,
@@ -104,7 +109,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
   useEffect(() => {
     if (!layers.includes(layer)) setLayer("top");
   }, [layers, layer]);
-  const drag = useRef<{ id: string; start: Vec; orig: Vec } | null>(null);
+  const drag = useRef<{ kind: "component" | "via"; id: string; start: Vec; orig: Vec; moved?: boolean; before?: Design } | null>(null);
   const fitted = useRef(false);
 
   const byId = useMemo(() => new Map(design.components.map((c) => [c.id, c])), [design.components]);
@@ -145,18 +150,36 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ed.focus]);
 
-  /** Add a routed trace, shoving other nets' traces aside first when shove mode is on. */
+  /** Apply what a shove moved: traces bent aside, vias moved (their traces already follow). */
+  const applyShove = (r: ShoveResult) => {
+    for (const c of r.changes) {
+      const old = tracesMap(doc).get(c.id);
+      if (old) tracesMap(doc).set(c.id, { ...old, points: c.points });
+    }
+    for (const m of r.viaMoves) {
+      const old = viasMap(doc).get(m.id);
+      if (old) viasMap(doc).set(m.id, { ...old, x: m.x, y: m.y });
+    }
+  };
+
+  /** Add a routed trace, shoving other nets' traces and vias aside first when shove mode is on. */
   const commitTrace = (t: { layer: CopperLayer; width: number; points: Vec[] }, net: string | undefined) => {
     if (shove) {
       const r = shoveTrace(design, t, net);
-      if (r.ok)
-        for (const c of r.changes) {
-          const old = tracesMap(doc).get(c.id);
-          if (old) tracesMap(doc).set(c.id, { ...old, points: c.points });
-        }
+      if (r.ok) applyShove(r);
       else toast(`Could not shove: ${r.reason}. The trace was added; DRC will flag the clash.`);
     }
     addTrace(doc, t);
+  };
+
+  /** Add a via, shoving other nets' copper aside first when shove mode is on. */
+  const commitVia = (at: Vec, diameter: number, drill: number, span: { from?: CopperLayer; to?: CopperLayer } | undefined, net: string | undefined) => {
+    if (shove) {
+      const r = shoveVia(getDesign(doc), { x: at.x, y: at.y, diameter, drill, ...span }, net);
+      if (r.ok) applyShove(r);
+      else toast(`Could not shove: ${r.reason}. The via was added; DRC will flag the clash.`);
+    }
+    addVia(doc, at, diameter, drill, span);
   };
 
   const finishRoute = (r: Routing | null) => {
@@ -210,7 +233,9 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       const span = viaMode === "span" ? { from: routing.layer, to: next } : undefined;
       doc.transact(() => {
         if (routing.points.length >= 2) commitTrace({ layer: routing.layer, width: routing.width, points: routing.points }, routing.net);
-        addVia(doc, last, rules.viaDiameter, rules.viaDrill, span);
+        // Without a net the via could not tell its own trace from others', so it is not shoved.
+        if (routing.net) commitVia(last, rules.viaDiameter, rules.viaDrill, span, routing.net);
+        else addVia(doc, last, rules.viaDiameter, rules.viaDrill, span);
       });
       setRouting({ ...routing, layer: next, points: [last] });
     }
@@ -305,8 +330,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         const [a, b] = [layers.indexOf(viaSpan[0]), layers.indexOf(viaSpan[1])];
         // A microvia joins an outer layer to its neighbour: laser drilled, small.
         const micro = Math.abs(a - b) === 1 && (Math.min(a, b) === 0 || Math.max(a, b) === layers.length - 1);
-        addVia(doc, snapped(raw), micro ? 0.25 : 0.5, micro ? 0.1 : 0.25, { from: viaSpan[0], to: viaSpan[1] });
-      } else addVia(doc, snapped(raw));
+        doc.transact(() => commitVia(snapped(raw), micro ? 0.25 : 0.5, micro ? 0.1 : 0.25, { from: viaSpan[0], to: viaSpan[1] }, undefined));
+      } else doc.transact(() => commitVia(snapped(raw), 0.6, 0.3, undefined, undefined));
       return;
     }
     if (tool === "comment") {
@@ -360,7 +385,14 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     if (hit?.kind === "component") {
       const c = byId.get(hit.id)!;
       undo.stopCapturing();
-      drag.current = { id: c.id, start: raw, orig: { x: c.pcb.x, y: c.pcb.y } };
+      drag.current = { kind: "component", id: c.id, start: raw, orig: { x: c.pcb.x, y: c.pcb.y } };
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    } else if (hit?.kind === "via") {
+      const v = design.vias.find((x) => x.id === hit.id)!;
+      undo.stopCapturing();
+      // Shoving is worked out on drop against the board as it was before the drag: copper the
+      // via passes over on the way would otherwise count as connected to it.
+      drag.current = { kind: "via", id: v.id, start: raw, orig: { x: v.x, y: v.y }, before: design };
       (e.currentTarget as Element).setPointerCapture(e.pointerId);
     } else if (!hit) {
       beginPan(e, vp.viewRef, vp.setView);
@@ -372,7 +404,23 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     setCursor(routing ? routeTarget(w, e.shiftKey) : snapped(w));
     publishCursor(provider, { view: "pcb", x: w.x, y: w.y });
     const d = drag.current;
-    if (d) {
+    if (d?.kind === "via") {
+      // The via's own traces follow it; with shove on, others make room when it is dropped.
+      const v = viasMap(doc).get(d.id);
+      const p = snapped({ x: d.orig.x + w.x - d.start.x, y: d.orig.y + w.y - d.start.y });
+      if (v && (p.x !== v.x || p.y !== v.y)) {
+        d.moved = true;
+        doc.transact(() => {
+          for (const t of tracesMap(doc).values()) {
+            const n = t.points.length - 1;
+            const hit = (q: Vec) => Math.hypot(q.x - v.x, q.y - v.y) < 1e-3;
+            if (!viaLayers(design.board, v).includes(t.layer) || !(hit(t.points[0]) || hit(t.points[n]))) continue;
+            tracesMap(doc).set(t.id, { ...t, points: t.points.map((q, i) => ((i === 0 || i === n) && hit(q) ? p : q)) });
+          }
+          viasMap(doc).set(d.id, { ...v, x: p.x, y: p.y });
+        });
+      }
+    } else if (d) {
       const c = byId.get(d.id);
       const p = e.altKey ? { x: d.orig.x + w.x - d.start.x, y: d.orig.y + w.y - d.start.y } : snapped({ x: d.orig.x + w.x - d.start.x, y: d.orig.y + w.y - d.start.y });
       if (c && (p.x !== c.pcb.x || p.y !== c.pcb.y)) updateComponent(doc, d.id, { pcb: { ...c.pcb, x: p.x, y: p.y } });
@@ -421,7 +469,19 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         style={{ cursor: tool === "select" ? "default" : "crosshair" }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={() => (drag.current = null)}
+        onPointerUp={() => {
+          const d = drag.current;
+          drag.current = null;
+          if (d?.kind === "via" && d.moved && shove && d.before) {
+            const v = viasMap(doc).get(d.id);
+            if (!v) return;
+            const a = analyzeCopper(d.before);
+            const item = a.items.find((it) => it.kind === "via" && it.via.id === v.id);
+            const r = shoveVia(d.before, v, item && a.netOfItem(item));
+            if (r.ok) doc.transact(() => applyShove(r));
+            else toast(`Could not shove: ${r.reason}`);
+          }
+        }}
         onPointerLeave={() => publishCursor(provider, null)}
         onDoubleClick={() => {
           // Chromium reports detail=0 on pointerdown, so double-click closing happens here.
@@ -625,8 +685,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             </option>
           ))}
         </select>
-        {tool === "route" && (
-          <label className="small row" style={{ gap: 4 }} title="Push other nets' traces aside when a new trace needs the room">
+        {(tool === "route" || tool === "via" || tool === "select") && (
+          <label className="small row" style={{ gap: 4 }} title="Push other nets' traces and vias aside when a new trace or via needs the room, or when you drag a via (pads never move)">
             <input type="checkbox" checked={shove} onChange={(e) => setShove(e.target.checked)} />
             Shove
           </label>

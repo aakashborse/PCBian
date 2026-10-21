@@ -26,6 +26,9 @@ import {
   setDiffPair,
   setLengthGroup,
   shoveTrace,
+  shoveVia,
+  viasMap,
+  type ShoveResult,
   suggestDiffPairs,
   tuneLength,
   diffImpedance,
@@ -140,6 +143,14 @@ function sheetId(doc: Y.Doc, sheet: string | undefined): string | undefined {
   const s = getDesign(doc).sheets.find((x) => x.id === sheet || x.name.toLowerCase() === sheet.toLowerCase());
   if (!s) throw new Error(`No sheet "${sheet}". Sheets: ${getDesign(doc).sheets.map((x) => `${x.id} (${x.name})`).join(", ")}`);
   return s.id;
+}
+
+/** Apply a shove's moves; returns a note on what moved. */
+function applyShove(doc: Y.Doc, r: ShoveResult): string {
+  for (const c of r.changes) tracesMap(doc).set(c.id, { ...tracesMap(doc).get(c.id)!, points: c.points });
+  for (const m of r.viaMoves) viasMap(doc).set(m.id, { ...viasMap(doc).get(m.id)!, x: m.x, y: m.y });
+  const parts = [r.changes.length ? `${r.changes.length} trace(s)` : "", r.viaMoves.length ? `${r.viaMoves.length} via(s)` : ""].filter(Boolean);
+  return parts.length ? ` (shoved ${parts.join(" and ")})` : "";
 }
 
 function assertLayer(doc: Y.Doc, l: CopperLayer) {
@@ -640,7 +651,7 @@ export const TOOLS = {
   }),
   route_trace: tool({
     description:
-      "Draw a trace manually as a polyline (mm) on a layer. Endpoints should land on pad centres or other copper of the same net. shove=true pushes other nets' traces aside to make room (push-and-shove); pads and vias never move.",
+      "Draw a trace manually as a polyline (mm) on a layer. Endpoints should land on pad centres or other copper of the same net. shove=true pushes other nets' traces aside and moves their vias (their traces follow) to make room (push-and-shove); pads never move.",
     schema: z.object({ layer, width: z.number().positive(), points: z.array(point).min(2), net: z.string().optional().describe("Net of the new trace (helps shove keep same-net copper)"), shove: z.boolean().optional() }),
     run: (doc, { layer: l, width, points, net, shove }) => {
       assertLayer(doc, l);
@@ -648,21 +659,26 @@ export const TOOLS = {
       if (shove) {
         const r = shoveTrace(getDesign(doc), { layer: l, width, points }, net);
         if (!r.ok) throw new Error(`Shove failed: ${r.reason}. Choose another path or layer.`);
-        for (const c of r.changes) tracesMap(doc).set(c.id, { ...tracesMap(doc).get(c.id)!, points: c.points });
-        note = r.changes.length ? ` (shoved ${r.changes.length} trace(s))` : "";
+        note = applyShove(doc, r);
       }
       return `Trace ${addTrace(doc, { layer: l, width, points }).id}${note}`;
     },
     label: ({ layer: l }) => `Route trace on ${l}`,
   }),
   add_via: tool({
-    description: "Place a via at a point (mm). Omit from/to for a through via; give a layer span for a blind, buried or micro via (microvias: adjacent outer pair, drill 0.1mm, diameter 0.25mm).",
-    schema: z.object({ x: z.number(), y: z.number(), diameter: z.number().positive().default(0.6), drill: z.number().positive().default(0.3), from: layer.optional(), to: layer.optional() }),
-    run: (doc, { x, y, diameter, drill, from, to }) => {
+    description: "Place a via at a point (mm). Omit from/to for a through via; give a layer span for a blind, buried or micro via (microvias: adjacent outer pair, drill 0.1mm, diameter 0.25mm). shove=true pushes other nets' traces and vias aside to make room.",
+    schema: z.object({ x: z.number(), y: z.number(), diameter: z.number().positive().default(0.6), drill: z.number().positive().default(0.3), from: layer.optional(), to: layer.optional(), net: z.string().optional(), shove: z.boolean().optional() }),
+    run: (doc, { x, y, diameter, drill, from, to, net, shove }) => {
       if (from) assertLayer(doc, from);
       if (to) assertLayer(doc, to);
-      const v = addVia(doc, { x, y }, diameter, drill, { from, to });
-      return `Via ${v.id} (${viaKind(getDesign(doc).board, v)})`;
+      let note = "";
+      if (shove) {
+        const r = shoveVia(getDesign(doc), { x, y, diameter, drill, from, to }, net);
+        if (!r.ok) throw new Error(`Shove failed: ${r.reason}. Choose another spot.`);
+        note = applyShove(doc, r);
+      }
+      const v = addVia(doc, { x, y }, diameter, drill, { from, to, net });
+      return `Via ${v.id} (${viaKind(getDesign(doc).board, v)})${note}`;
     },
     label: ({ x, y }) => `Via at ${x},${y}`,
   }),

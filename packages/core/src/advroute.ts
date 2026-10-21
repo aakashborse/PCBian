@@ -3,7 +3,8 @@
 import { analyzeCopper, copperGap, netLengths, sharedLayers, traceLength, type CopperAnalysis, type CopperItem } from "./copper";
 import { boardOutline, netRules } from "./doc";
 import { padDistance, pointInPolygon, pointSegmentDistance, segmentSegmentDistance } from "./geometry";
-import type { Design, Trace, Vec } from "./types";
+import { viaLayers } from "./stackup";
+import type { Design, Trace, Vec, Via } from "./types";
 
 const EDGE_CLEAR = 0.3;
 
@@ -38,22 +39,33 @@ function pointGap(q: Vec, it: CopperItem): number {
 }
 
 /** Copper-geometry checker for candidate traces against everything not on `net`. */
-function checker(design: Design, analysis: CopperAnalysis, overrides: Map<string, Trace> = new Map(), extra: { item: CopperItem; net: string | undefined }[] = []) {
+function checker(design: Design, analysis: CopperAnalysis, overrides: Map<string, Trace> = new Map(), extra: { item: CopperItem; net: string | undefined }[] = [], viaOverrides: Map<string, Via> = new Map(), conn: CopperAnalysis = analysis) {
   const outline = boardOutline(design.board);
   const holes = design.board.cutouts ?? [];
   const edges = [outline, ...holes].flatMap((poly) => poly.map((p, i) => [p, poly[(i + 1) % poly.length]] as [Vec, Vec]));
-  const items = () => [...analysis.items.map((it) => (it.kind === "trace" && overrides.has(it.trace.id) ? { ...it, trace: overrides.get(it.trace.id)! } : it)), ...extra.map((e) => e.item)];
-  const netOf = (it: CopperItem) => extra.find((e) => e.item.key === it.key)?.net ?? analysis.netOfItem(it);
+  const items = () => [
+    ...analysis.items.map((it) => (it.kind === "trace" && overrides.has(it.trace.id) ? { ...it, trace: overrides.get(it.trace.id)! } : it.kind === "via" && viaOverrides.has(it.via.id) ? { ...it, via: viaOverrides.get(it.via.id)! } : it)),
+    ...extra.map((e) => e.item),
+  ];
+  // Connectivity (nets, connected clusters) can come from another state of the board: when a via is
+  // dragged onto copper, what it was connected to before the move is what counts.
+  const netOf = (it: CopperItem) => extra.find((e) => e.item.key === it.key)?.net ?? conn.netOfItem(it);
   const inside = (p: Vec) => pointInPolygon(p, outline) && !holes.some((h) => pointInPolygon(p, h));
   return {
     items,
     /** Foreign items closer than the clearance rule to `t` (excluding `ignore` trace ids). */
     conflicts(t: Trace, net: string | undefined, ignore: Set<string> = new Set()): CopperItem[] {
-      const me: CopperItem = { kind: "trace", key: `trace:${t.id}`, trace: t };
+      return this.conflictsOf({ kind: "trace", key: `trace:${t.id}`, trace: t }, net, new Set([...ignore].map((id) => `trace:${id}`)));
+    },
+    /** Foreign items closer than the clearance rule to any copper item (excluding `ignore` keys). */
+    conflictsOf(me: CopperItem, net: string | undefined, ignore: Set<string> = new Set()): CopperItem[] {
       const cl = netRules(design, net).clearance;
       const out: CopperItem[] = [];
+      // Copper already connected to `me` (one cluster) is never a clash, even with no net name.
+      const mine = conn.clusterOf.get(me.key);
       for (const it of items()) {
-        if (it.kind === "trace" && (it.trace.id === t.id || ignore.has(it.trace.id))) continue;
+        if (it.key === me.key || ignore.has(it.key)) continue;
+        if (mine !== undefined && conn.clusterOf.get(it.key) === mine) continue;
         if (!sharedLayers(me, it).length) continue;
         const other = netOf(it);
         if (net && other === net) continue;
@@ -186,50 +198,173 @@ export interface ShoveResult {
   ok: boolean;
   /** Existing traces moved out of the way. */
   changes: TraceChange[];
+  /** Existing vias moved out of the way (their traces follow, in `changes`). */
+  viaMoves: { id: string; x: number; y: number }[];
   reason?: string;
 }
 
+const fail = (reason: string): ShoveResult => ({ ok: false, changes: [], viaMoves: [], reason });
+
 /**
- * Make room for a new trace by pushing conflicting traces of other nets aside with local bumps,
- * recursively (a pushed trace may push its neighbours). Pads and vias never move.
+ * The shove engine: starting from a new or moved item, push whatever of another net it crowds,
+ * recursively. Traces are bumped aside (around traces, vias and pads alike, trying the other side
+ * when one is blocked); vias are moved away and their traces follow; pads never move.
  */
-export function shoveTrace(design: Design, trace: Omit<Trace, "id">, net: string | undefined, maxDepth = 4): ShoveResult {
-  const analysis = analyzeCopper(design);
-  const overrides = new Map<string, Trace>();
-  const head: Trace = { ...trace, id: "__shove_new" };
-  const chk = checker(design, analysis, overrides, [{ item: { kind: "trace", key: "trace:__shove_new", trace: head }, net }]);
-  const netOfTrace = (id: string) => {
-    const it = analysis.items.find((x) => x.kind === "trace" && x.trace.id === id);
-    return it ? analysis.netOfItem(it) : undefined;
+function shoveFrom(design: Design, head: { item: CopperItem; net: string | undefined; isNew: boolean }, maxDepth: number, conn?: CopperAnalysis): ShoveResult {
+  const geometry = analyzeCopper(design);
+  // Nets and connected clusters (from the board before a move, when given).
+  const analysis = conn ?? geometry;
+  const traceOver = new Map<string, Trace>();
+  const viaOver = new Map<string, Via>();
+  const chk = checker(design, geometry, traceOver, head.isNew ? [{ item: head.item, net: head.net }] : [], viaOver, analysis);
+  if (!head.isNew && head.item.kind === "via") viaOver.set(head.item.via.id, head.item.via);
+  const netOf = (it: CopperItem) => (it.key === head.item.key ? head.net : analysis.netOfItem(it));
+  const current = (it: CopperItem): CopperItem =>
+    it.kind === "trace" && traceOver.has(it.trace.id) ? { ...it, trace: traceOver.get(it.trace.id)! } : it.kind === "via" && viaOver.has(it.via.id) ? { ...it, via: viaOver.get(it.via.id)! } : it;
+  const clearance = (a: string | undefined, b: string | undefined) => Math.max(netRules(design, a).clearance, netRules(design, b).clearance);
+  const pads = (net: string | undefined) => chk.items().filter((it) => it.kind === "pad" && (!net || netOf(it) !== net));
+  const clearOfPads = (it: CopperItem, net: string | undefined) => pads(net).every((p) => !sharedLayers(it, p).length || copperGap(it, p) >= clearance(net, netOf(p)) - 1e-6);
+  const viaInside = (v: Via) => {
+    const outline = boardOutline(design.board);
+    const r = v.diameter / 2 + EDGE_CLEAR;
+    return [0, 90, 180, 270].every((a) => pointInPolygon({ x: v.x + r * Math.cos((a * Math.PI) / 180), y: v.y + r * Math.sin((a * Math.PI) / 180) }, outline));
   };
-  // Work list of fixed obstacles (the new trace, then every trace already pushed).
-  const queue: { t: Trace; net: string | undefined; depth: number }[] = [{ t: head, net, depth: 0 }];
-  const locked = new Set<string>([head.id]);
+
+  /** Traces of a via's net ending on it (on one of its layers): they follow the via. */
+  const attached = (v: Via, net: string | undefined): Trace[] =>
+    chk.items().flatMap((it) => {
+      if (it.kind !== "trace" || !viaLayers(design.board, v).includes(it.trace.layer)) return [];
+      const t = it.trace;
+      const ends = [t.points[0], t.points[t.points.length - 1]];
+      if (!ends.some((p) => Math.hypot(p.x - v.x, p.y - v.y) < 1e-3)) return [];
+      return analysis.netOfItem(it) === net || !net ? [t] : [];
+    });
+  const follow = (t: Trace, from: Vec, to: Vec): Trace => ({
+    ...t,
+    points: t.points.map((p, i) => ((i === 0 || i === t.points.length - 1) && Math.hypot(p.x - from.x, p.y - from.y) < 1e-3 ? r4(to) : p)),
+  });
+
+  /** Push a trace off an obstacle, preferring the side the obstacle is not on. */
+  const pushTrace = (victim: Trace, vnet: string | undefined, obstacle: CopperItem, onet: string | undefined): Trace | null => {
+    const cl = clearance(vnet, onet);
+    for (const side of [0, 1]) {
+      const cand = bump(victim, obstacle, cl, side === 1);
+      if (!cand || !chk.edgeOk(cand)) continue;
+      const it: CopperItem = { kind: "trace", key: `trace:${cand.id}`, trace: cand };
+      if (clearOfPads(it, vnet)) return cand;
+    }
+    return null;
+  };
+  /** Move a via off an obstacle: straight away from it, else turned up to 90° either way. */
+  const pushVia = (victim: Via, vnet: string | undefined, obstacle: CopperItem, onet: string | undefined): Via | null => {
+    const cl = clearance(vnet, onet);
+    const layers = viaLayers(design.board, victim);
+    const at = (v: Via): CopperItem => ({ kind: "via", key: `via:${v.id}`, via: v, layers });
+    const e = 1e-3;
+    const g = (q: Vec) => pointGap(q, obstacle);
+    let dir = { x: g({ x: victim.x + e, y: victim.y }) - g({ x: victim.x - e, y: victim.y }), y: g({ x: victim.x, y: victim.y + e }) - g({ x: victim.x, y: victim.y - e }) };
+    const l = Math.hypot(dir.x, dir.y);
+    dir = l > 1e-9 ? mul(dir, 1 / l) : { x: 1, y: 0 };
+    for (const turn of [0, 45, -45, 90, -90]) {
+      const a = (turn * Math.PI) / 180;
+      const d = { x: dir.x * Math.cos(a) - dir.y * Math.sin(a), y: dir.x * Math.sin(a) + dir.y * Math.cos(a) };
+      for (let s = 0.025; s <= 3; s += 0.025) {
+        const v = { ...victim, ...r4(add(victim, mul(d, s))) };
+        if (copperGap(at(v), obstacle) < cl - 1e-6) continue;
+        if (viaInside(v) && clearOfPads(at(v), vnet)) return v;
+        break;
+      }
+    }
+    return null;
+  };
+
+  const queue: { it: CopperItem; net: string | undefined; depth: number }[] = [{ it: head.item, net: head.net, depth: 0 }];
+  const locked = new Set<string>([head.item.key]);
   while (queue.length) {
-    const { t, net: tn, depth } = queue.shift()!;
-    for (const it of chk.conflicts(t, tn, locked)) {
-      if (it.kind !== "trace") return { ok: false, changes: [], reason: `blocked by ${it.kind === "pad" ? `${it.pad.ref} pad ${it.pad.id}` : "a via"} (pads and vias are not shoved)` };
-      if (depth >= maxDepth) return { ok: false, changes: [], reason: "too many traces would have to move" };
-      const victim = overrides.get(it.trace.id) ?? it.trace;
-      const vnet = netOfTrace(victim.id);
-      const cl = Math.max(netRules(design, vnet).clearance, netRules(design, tn).clearance);
-      const pushed = bump(victim, t, cl);
-      if (!pushed || !chk.edgeOk(pushed)) return { ok: false, changes: [], reason: "a trace cannot be pushed far enough (it crosses the new trace or hits the board edge)" };
-      overrides.set(victim.id, pushed);
-      locked.add(victim.id);
-      queue.push({ t: pushed, net: vnet, depth: depth + 1 });
+    const { it, net, depth } = queue.shift()!;
+    const me = current(it);
+    for (const hit of chk.conflictsOf(me, net, locked)) {
+      const hnet = netOf(hit);
+      if (hit.kind === "pad") {
+        if (depth === 0) return fail(`blocked by ${hit.pad.ref} pad ${hit.pad.id} (pads do not move)`);
+        return fail(`a pushed ${me.kind} would hit ${hit.pad.ref} pad ${hit.pad.id}`);
+      }
+      if (depth >= maxDepth) return fail("too many traces and vias would have to move");
+      if (hit.kind === "trace") {
+        const victim = traceOver.get(hit.trace.id) ?? hit.trace;
+        const pushed = pushTrace(victim, hnet, me, net);
+        if (!pushed) return fail("a trace cannot be pushed far enough (it crosses, or would hit a pad or the board edge)");
+        traceOver.set(victim.id, pushed);
+        locked.add(hit.key);
+        queue.push({ it: { kind: "trace", key: hit.key, trace: pushed }, net: hnet, depth: depth + 1 });
+      } else {
+        const victim = viaOver.get(hit.via.id) ?? hit.via;
+        const moved = pushVia(victim, hnet, me, net);
+        if (!moved) return fail("a via cannot be moved clear (pads or the board edge are in the way)");
+        viaOver.set(victim.id, moved);
+        locked.add(hit.key);
+        queue.push({ it: { ...hit, via: moved }, net: hnet, depth: depth + 1 });
+        for (const t of attached(victim, hnet)) {
+          const f = follow(traceOver.get(t.id) ?? t, victim, moved);
+          traceOver.set(t.id, f);
+          locked.add(`trace:${t.id}`);
+          queue.push({ it: { kind: "trace", key: `trace:${t.id}`, trace: f }, net: hnet, depth: depth + 1 });
+        }
+      }
     }
   }
-  // Final check: the new trace and everything moved are clear of all other copper.
-  for (const t of [head, ...overrides.values()]) {
-    if (chk.conflicts(t, t.id === head.id ? net : netOfTrace(t.id)).length) return { ok: false, changes: [], reason: "no clean position found" };
-  }
-  return { ok: true, changes: [...overrides].map(([id, t]) => ({ id, points: t.points })) };
+  // Final check: everything placed or moved is clear of all other copper.
+  const moved: CopperItem[] = [current(head.item), ...[...traceOver.values()].map((t): CopperItem => ({ kind: "trace", key: `trace:${t.id}`, trace: t })), ...[...viaOver.values()].map((v): CopperItem => ({ kind: "via", key: `via:${v.id}`, via: v, layers: viaLayers(design.board, v) }))];
+  for (const m of moved) if (chk.conflictsOf(m, m.key === head.item.key ? head.net : analysis.netOfItem(m)).length) return fail("no clean position found");
+  return {
+    ok: true,
+    changes: [...traceOver].map(([id, t]) => ({ id, points: t.points })),
+    viaMoves: [...viaOver].filter(([id]) => head.isNew || head.item.kind !== "via" || id !== head.item.via.id).map(([id, v]) => ({ id, x: v.x, y: v.y })),
+  };
 }
 
-/** Push the conflicting stretch of `victim` away from `obstacle` with 45° ramps. */
-function bump(victim: Trace, obstacle: Trace, cl: number): Trace | null {
-  const obs: CopperItem = { kind: "trace", key: "obs", trace: obstacle };
+/**
+ * Make room for a new trace by pushing conflicting traces and vias of other nets aside,
+ * recursively (a pushed trace or via may push its neighbours). Pads never move.
+ */
+export function shoveTrace(design: Design, trace: Omit<Trace, "id">, net: string | undefined, maxDepth = 4): ShoveResult {
+  return shoveFrom(design, { item: { kind: "trace", key: "trace:__shove_new", trace: { ...trace, id: "__shove_new" } }, net, isNew: true }, maxDepth);
+}
+
+/**
+ * Place a new via, or move an existing one (give its id), pushing traces and vias of other nets
+ * out of the way. A moved via's own traces follow it (in `changes`).
+ */
+export function shoveVia(design: Design, via: Omit<Via, "id"> & { id?: string }, net: string | undefined, maxDepth = 4): ShoveResult {
+  const existing = via.id ? design.vias.find((v) => v.id === via.id) : undefined;
+  if (!existing) {
+    const v = { ...via, id: "__shove_via" };
+    return shoveFrom(design, { item: { kind: "via", key: "via:__shove_via", via: v, layers: viaLayers(design.board, v) }, net, isNew: true }, maxDepth);
+  }
+  // Moving an existing via: it is the head, its traces follow and push too.
+  const moved = { ...existing, x: via.x, y: via.y };
+  const ownTraces = design.traces.filter((t) => viaLayers(design.board, existing).includes(t.layer) && [t.points[0], t.points[t.points.length - 1]].some((p) => Math.hypot(p.x - existing.x, p.y - existing.y) < 1e-3));
+  const followed = ownTraces.map((t) => ({ ...t, points: t.points.map((p, i) => ((i === 0 || i === t.points.length - 1) && Math.hypot(p.x - existing.x, p.y - existing.y) < 1e-3 ? r4(moved) : p)) }));
+  const d2: Design = { ...design, vias: design.vias.map((v) => (v.id === existing.id ? moved : v)), traces: design.traces.map((t) => followed.find((f) => f.id === t.id) ?? t) };
+  // Shove from the via first, then from each of its traces in turn, accumulating the moves.
+  // Connectivity is the board's before the move: copper the via now overlaps is not "its" copper.
+  const conn = analyzeCopper(design);
+  let cur = d2;
+  const changes = new Map<string, Vec[]>(followed.map((t) => [t.id, t.points]));
+  const viaMoves = new Map<string, { id: string; x: number; y: number }>();
+  const heads: CopperItem[] = [{ kind: "via", key: `via:${moved.id}`, via: moved, layers: viaLayers(design.board, moved) }, ...followed.map((t): CopperItem => ({ kind: "trace", key: `trace:${t.id}`, trace: t }))];
+  for (const h of heads) {
+    const r = shoveFrom(cur, { item: h, net, isNew: false }, maxDepth, conn);
+    if (!r.ok) return r;
+    for (const c of r.changes) changes.set(c.id, c.points);
+    for (const m of r.viaMoves) viaMoves.set(m.id, m);
+    cur = { ...cur, traces: cur.traces.map((t) => (changes.has(t.id) ? { ...t, points: changes.get(t.id)! } : t)), vias: cur.vias.map((v) => (viaMoves.has(v.id) ? { ...v, ...viaMoves.get(v.id)! } : v)) };
+  }
+  return { ok: true, changes: [...changes].map(([id, points]) => ({ id, points })), viaMoves: [...viaMoves.values()] };
+}
+
+/** Push the conflicting stretch of `victim` away from `obstacle` (any copper) with 45° ramps. */
+function bump(victim: Trace, obs: CopperItem, cl: number, otherSide = false): Trace | null {
   const need = cl + victim.width / 2;
   let pts = victim.points;
   for (let i = 0; i < pts.length - 1; i++) {
@@ -238,7 +373,7 @@ function bump(victim: Trace, obstacle: Trace, cl: number): Trace | null {
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     if (len < 1e-6) continue;
     // A crossing cannot be shoved sideways.
-    for (let k = 1; k < obstacle.points.length; k++) if (segmentSegmentDistance(a, b, obstacle.points[k - 1], obstacle.points[k]) < 1e-9) return null;
+    if (obs.kind === "trace") for (let k = 1; k < obs.trace.points.length; k++) if (segmentSegmentDistance(a, b, obs.trace.points[k - 1], obs.trace.points[k]) < 1e-9) return null;
     const u = mul(sub(b, a), 1 / len);
     const n = { x: -u.y, y: u.x };
     const step = Math.min(0.05, len / 20);
@@ -255,9 +390,10 @@ function bump(victim: Trace, obstacle: Trace, cl: number): Trace | null {
       }
     }
     if (t0 > t1) continue;
-    const dir = sideSum >= 0 ? 1 : -1;
+    const dir = (sideSum >= 0 ? 1 : -1) * (otherSide ? -1 : 1);
     // Grow the shift until the stretch clears the obstacle.
-    for (let shift = 0.05; shift <= 3; shift += 0.05) {
+    let done = false;
+    for (let shift = 0.05; shift <= 3 + 1e-9; shift += 0.05) {
       const s0 = Math.max(0, t0 - need - shift);
       const s1 = Math.min(len, t1 + need + shift);
       const p1 = add(a, mul(u, s0));
@@ -271,10 +407,11 @@ function bump(victim: Trace, obstacle: Trace, cl: number): Trace | null {
       if (copperGap({ kind: "trace", key: "v", trace: cand }, obs) >= cl - 1e-6) {
         pts = cand.points;
         i += mid.length;
+        done = true;
         break;
       }
-      if (shift + 0.05 > 3) return null;
     }
+    if (!done) return null;
   }
   return { ...victim, points: pts };
 }
