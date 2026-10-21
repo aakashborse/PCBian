@@ -7,12 +7,12 @@ import {
   padRect,
   padsOf,
   pointInPolygon,
-  pointSegmentDistance,
   polylineTouchesPolygon,
   rectsOverlap,
   segmentRectDistance,
   segmentSegmentDistance,
   toWorld,
+  type Rect,
   type WorldPad,
 } from "./geometry";
 import { getPart } from "./library";
@@ -37,31 +37,34 @@ export function itemOnLayer(item: CopperItem, layer: CopperLayer): boolean {
 export function copperGap(a: CopperItem, b: CopperItem): number {
   return gap(a, b);
 }
+/** Copper of an item as capsules (segment + radius) and rectangles. */
+type Prim = { kind: "cap"; a: Vec; b: Vec; r: number } | { kind: "rect"; r: Rect };
+function prims(it: CopperItem): Prim[] {
+  if (it.kind === "via") return [{ kind: "cap", a: it.via, b: it.via, r: it.via.diameter / 2 }];
+  if (it.kind === "trace") return segs(it.trace).map(([a, b]) => ({ kind: "cap", a, b, r: it.trace.width / 2 }));
+  const p = it.pad;
+  // Round pads are circles and oval pads are stadiums, not their bounding boxes.
+  if (p.shape === "circle") return [{ kind: "cap", a: p.world, b: p.world, r: Math.min(p.ww, p.wh) / 2 }];
+  if (p.shape === "oval") {
+    const r = Math.min(p.ww, p.wh) / 2;
+    const dx = p.ww / 2 - r;
+    const dy = p.wh / 2 - r;
+    return [{ kind: "cap", a: { x: p.world.x - dx, y: p.world.y - dy }, b: { x: p.world.x + dx, y: p.world.y + dy }, r }];
+  }
+  return [{ kind: "rect", r: padRect(p) }];
+}
+function primGap(a: Prim, b: Prim): number {
+  if (a.kind === "cap" && b.kind === "cap") return segmentSegmentDistance(a.a, a.b, b.a, b.b) - a.r - b.r;
+  if (a.kind === "cap" && b.kind === "rect") return segmentRectDistance(a.a, a.b, b.r) - a.r;
+  if (a.kind === "rect" && b.kind === "cap") return primGap(b, a);
+  const ra = (a as { r: Rect }).r;
+  const rb = (b as { r: Rect }).r;
+  return Math.hypot(Math.max(0, ra.x0 - rb.x1, rb.x0 - ra.x1), Math.max(0, ra.y0 - rb.y1, rb.y0 - ra.y1));
+}
 function gap(a: CopperItem, b: CopperItem): number {
-  if (a.kind === "trace" && b.kind !== "trace") return gap(b, a);
-  if (a.kind === "via" && b.kind === "pad") return gap(b, a);
-  if (a.kind === "pad" && b.kind === "pad") {
-    const ra = padRect(a.pad);
-    const rb = padRect(b.pad);
-    const dx = Math.max(0, ra.x0 - rb.x1, rb.x0 - ra.x1);
-    const dy = Math.max(0, ra.y0 - rb.y1, rb.y0 - ra.y1);
-    return Math.hypot(dx, dy);
-  }
-  if (a.kind === "pad" && b.kind === "via") return segmentRectDistance(b.via, b.via, padRect(a.pad)) - b.via.diameter / 2;
-  if (a.kind === "via" && b.kind === "via") return dist(a.via, b.via) - (a.via.diameter + b.via.diameter) / 2;
-  if (a.kind === "pad" && b.kind === "trace") {
-    const r = padRect(a.pad);
-    return Math.min(...segs(b.trace).map(([p, q]) => segmentRectDistance(p, q, r))) - b.trace.width / 2;
-  }
-  if (a.kind === "via" && b.kind === "trace") {
-    return Math.min(...segs(b.trace).map(([p, q]) => pointSegmentDistance(a.via, p, q))) - a.via.diameter / 2 - b.trace.width / 2;
-  }
-  if (a.kind === "trace" && b.kind === "trace") {
-    let best = Infinity;
-    for (const [p, q] of segs(a.trace)) for (const [r, s] of segs(b.trace)) best = Math.min(best, segmentSegmentDistance(p, q, r, s));
-    return best - (a.trace.width + b.trace.width) / 2;
-  }
-  return Infinity;
+  let best = Infinity;
+  for (const p of prims(a)) for (const q of prims(b)) best = Math.min(best, primGap(p, q));
+  return best;
 }
 
 export const sharedLayers = (a: CopperItem, b: CopperItem): CopperLayer[] => ALL_COPPER.filter((l) => itemOnLayer(a, l) && itemOnLayer(b, l));
@@ -419,7 +422,11 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
   const byId = new Map(design.components.map((c) => [c.id, c]));
   for (const n of nets) {
     const phys = n.terminals.filter((t) => getPart(byId.get(t.comp)!.partId)?.kind === "part");
-    const isNc = (t: { comp: string; pin: string }) => byId.get(t.comp)!.noConnect?.includes(t.pin) ?? false;
+    // A pin is intentionally unconnected if flagged, or if its electrical type is "not connected".
+    const isNc = (t: { comp: string; pin: string }) => {
+      const c = byId.get(t.comp)!;
+      return (c.noConnect?.includes(t.pin) ?? false) || getPart(c.partId)?.symbol.pins.find((p) => p.id === t.pin)?.type === "nc";
+    };
     for (const t of phys.filter(isNc)) {
       if (n.terminals.length > 1) {
         const c = byId.get(t.comp)!;
