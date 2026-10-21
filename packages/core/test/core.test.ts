@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  allPins,
   addComponent,
   addTrace,
   addVia,
@@ -39,7 +40,7 @@ describe("library", () => {
   it("every footprint pad has a matching symbol pin", () => {
     for (const p of PARTS) {
       if (!p.footprint) continue;
-      const pins = new Set(p.symbol.pins.map((x) => x.id));
+      const pins = new Set(allPins(p).map((x) => x.id));
       for (const pad of p.footprint.pads) expect(pins.has(pad.id), `${p.id} pad ${pad.id}`).toBe(true);
       for (const pin of pins) expect(p.footprint.pads.some((pad) => pad.id === pin), `${p.id} pin ${pin}`).toBe(true);
     }

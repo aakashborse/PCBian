@@ -1,4 +1,4 @@
-import { getPart } from "./library";
+import { getPart, unitCount } from "./library";
 import { ALL_COPPER, type ComponentData, type CopperLayer, type Pad, type PcbPlacement, type Rotation, type SymbolPin, type Vec } from "./types";
 
 /** Rotate by any angle in degrees (90 maps +x to +y, i.e. clockwise on a y-down screen). */
@@ -90,15 +90,42 @@ export function rectsOverlap(a: Rect, b: Rect): boolean {
 
 export interface WorldPin extends SymbolPin {
   world: Vec;
+  /** Unit of a multi-unit part the pin belongs to (1 for ordinary parts). */
+  unit: number;
+  /** Sheet the pin's unit is drawn on (undefined: the first sheet). */
+  sheet?: string;
+}
+
+/**
+ * A component as drawn on the schematic: one view per unit, each a component whose `sch` and
+ * `sheet` are that unit's placement and whose part is the unit's symbol. Ordinary parts have one
+ * view, the component itself (with unit 1).
+ */
+export function schematicViews(c: ComponentData): ComponentData[] {
+  if (c.unit) return [c];
+  const n = unitCount(getPart(c.partId));
+  if (n === 1) return [{ ...c, unit: 1 }];
+  return Array.from({ length: n }, (_, i) => {
+    const u = i === 0 ? { ...c.sch, sheet: c.sheet } : (c.units?.[i - 1] ?? { x: c.sch.x + 60 * i, y: c.sch.y, rot: c.sch.rot, sheet: c.sheet });
+    const { sheet, ...sch } = u;
+    return { ...c, partId: `${c.partId}#u${i + 1}`, sch, sheet, unit: i + 1 };
+  });
+}
+
+/** Reference as shown on a unit's symbol: "U1A", "U1B"… for multi-unit parts, else "U1". */
+export function unitRef(c: ComponentData): string {
+  if (!c.unit || unitCount(getPart(c.partId.replace(/#u\d+$/, ""))) === 1) return c.ref;
+  return c.ref + String.fromCharCode(64 + c.unit);
 }
 
 export function schematicPins(c: ComponentData): WorldPin[] {
+  if (!c.unit && unitCount(getPart(c.partId)) > 1) return schematicViews(c).flatMap(schematicPins);
   const part = getPart(c.partId);
   if (!part) return [];
   const mirror = Boolean(c.sch.mirror);
   // A mirrored pin on the left side ends up on the right (and vice versa).
   const flip = (side: SymbolPin["side"]): SymbolPin["side"] => (mirror && side === "left" ? "right" : mirror && side === "right" ? "left" : side);
-  return part.symbol.pins.map((p) => ({ ...p, side: flip(p.side), world: toWorld(p, c.sch, mirror) }));
+  return part.symbol.pins.map((p) => ({ ...p, side: flip(p.side), world: toWorld(p, c.sch, mirror), unit: c.unit ?? 1, sheet: c.sheet }));
 }
 
 export function schematicPin(c: ComponentData, pinId: string): Vec | undefined {

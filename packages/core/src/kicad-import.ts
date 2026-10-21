@@ -1,7 +1,7 @@
 // Import KiCad 6/7/8 projects: schematics (.kicad_sch, multi-sheet/hierarchical) and boards (.kicad_pcb).
 // Connectivity is resolved from KiCad geometry, then rebuilt in PCBian as pin-to-pin wires and labels.
 import type * as Y from "yjs";
-import { addComponent, addCustomPart, addKeepout, addSchGraphic, addSheet, addTrace, addVia, addWire, addZone, componentsMap, getDesign, renameSheet, setBoard, setBoardOutline, setDesignRules, sheetPartId, updateComponent } from "./doc";
+import { addComponent, addCustomPart, addKeepout, addSchGraphic, addSheet, addTrace, addVia, addWire, addZone, componentsMap, getDesign, renameSheet, setBoard, setBoardOutline, setDesignRules, setSchPlacement, sheetPartId, updateComponent } from "./doc";
 import { copperLayers, fromKicadLayerName } from "./stackup";
 import { analyzeCopper } from "./copper";
 import { attachNet } from "./edit";
@@ -293,6 +293,8 @@ interface SchSymbolInstance {
   pins: Map<string, Vec>;
   power: boolean;
   dnp: boolean;
+  /** Unit of a multi-unit symbol (1-based). */
+  unit: number;
 }
 
 function symbolInstances(
@@ -345,6 +347,7 @@ function symbolInstances(
       pins,
       power: lib.power,
       dnp: kid(s, "dnp")?.[1] === "yes" || kid(s, "in_bom")?.[1] === "no",
+      unit,
     });
   }
   return out;
@@ -603,7 +606,7 @@ function importKicadSchematics(ctx: ImportCtx, files: { name: string; text: stri
           points.push({ ...pt(pinPos), term: { comp: c.id, pin: "1" } });
           continue;
         }
-        // Multi-unit symbols share a reference: merge units into one component.
+        // Multi-unit symbols share a reference: each instance places one unit of one component.
         let compId = seenRefs.get(inst.ref);
         if (!compId) {
           const board = pcbByRef.get(inst.ref);
@@ -617,10 +620,12 @@ function importKicadSchematics(ctx: ImportCtx, files: { name: string; text: stri
           const sig = JSON.stringify([inst.libId, lib.symbol.pins.map((x) => x.id), footprint]);
           const part = makePart(sig, () => ({ id: uidPart(), name: lib.name, category: "Imported (KiCad)", description: lib.description || lib.name, kind: "part", refPrefix: lib.refPrefix, defaultValue: lib.value, keywords: ["kicad"], symbol: lib.symbol, footprint: footprint && footprint.pads.length ? footprint : null }));
           const c = addComponent(doc, part.id, inst.at, { ref: inst.ref, value: inst.value, rot: inst.rot, sheet: sheet === firstSheet ? undefined : sheet, pcb: pcbPlacement(inst.ref) });
-          updateComponent(doc, c.id, { sch: { x: inst.at.x, y: inst.at.y, rot: inst.rot, mirror: inst.mirror }, ...(inst.dnp ? { dnp: true } : {}) });
+          if (inst.dnp) updateComponent(doc, c.id, { dnp: true });
           compId = c.id;
           seenRefs.set(inst.ref, compId);
-        } else if (!warnings.some((w) => w.startsWith(`${inst.ref}: multi-unit`))) warnings.push(`${inst.ref}: multi-unit symbol merged into one component`);
+        }
+        const nUnits = 1 + (lib.symbol.units?.length ?? 0);
+        setSchPlacement(doc, compId, Math.min(inst.unit, nUnits), { x: inst.at.x, y: inst.at.y, rot: inst.rot, mirror: inst.mirror }, sheet === firstSheet ? null : sheet);
         for (const [pin, at] of inst.pins) points.push({ ...pt(at), term: { comp: compId, pin } });
       }
       const labelKinds: [string, string][] = [

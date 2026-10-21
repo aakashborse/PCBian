@@ -155,9 +155,12 @@ const KTYPE: Record<string, PinType> = {
 export function symbolFromSExpr(sym: SExpr[]): { name: string; refPrefix: string; value: string; description: string; symbol: PartSymbol; pins: { id: string; name: string }[]; power: boolean } {
   const props = new Map(children(sym, "property").map((p) => [p[1] as string, p[2] as string]));
   const k = 10 / 2.54;
-  const pins: SymbolPin[] = [];
-  const shapes: Shape[] = [];
-  const walk = (e: SExpr[]) => {
+  // Per KiCad unit (0 = common to every unit).
+  const byUnit = new Map<number, { pins: SymbolPin[]; shapes: Shape[] }>();
+  const bucket = (u: number) => byUnit.get(u) ?? (byUnit.set(u, { pins: [], shapes: [] }), byUnit.get(u)!);
+  const seen = new Set<string>();
+  const walk = (e: SExpr[], unit: number) => {
+    const { pins, shapes } = bucket(unit);
     for (const p of children(e, "pin")) {
       const at = child(p, "at");
       const len = num(child(p, "length"), 1, 2.54);
@@ -165,7 +168,8 @@ export function symbolFromSExpr(sym: SExpr[]): { name: string; refPrefix: string
       const side: SymbolPin["side"] = ang === 0 ? "left" : ang === 180 ? "right" : ang === 90 ? "bottom" : "top";
       const name = (child(p, "name")?.[1] as string) ?? "";
       const number = (child(p, "number")?.[1] as string) ?? "";
-      if (pins.some((x) => x.id === number)) continue;
+      if (seen.has(number)) continue;
+      seen.add(number);
       pins.push({ id: number, name: name === "~" || name === "" ? number : name, x: Math.round(num(at, 1) * k), y: Math.round(-num(at, 2) * k), side, length: Math.round(len * k), showName: name !== "~", showNumber: true, type: KTYPE[p[1] as string] ?? "passive" });
     }
     for (const r of children(e, "rectangle")) {
@@ -183,9 +187,22 @@ export function symbolFromSExpr(sym: SExpr[]): { name: string; refPrefix: string
     }
     for (const c of children(e, "circle")) shapes.push({ kind: "circle", x: num(child(c, "center"), 1) * k, y: -num(child(c, "center"), 2) * k, r: num(child(c, "radius"), 1) * k });
     // Sub-symbols are named NAME_unit_style; skip alternate (De Morgan) body styles.
-    for (const sub of children(e, "symbol")) if (!/_\d+_2$/.test(String(sub[1]))) walk(sub);
+    for (const sub of children(e, "symbol")) {
+      const m = String(sub[1]).match(/_(\d+)_(\d+)$/);
+      if (m?.[2] === "2") continue;
+      walk(sub, m ? Number(m[1]) : unit);
+    }
   };
-  walk(sym);
+  walk(sym, 0);
+  // Units 1..n; common (unit 0) graphics appear on every unit, common pins on the first.
+  const unitNos = [...byUnit.keys()].filter((u) => u > 0).sort((a, b) => a - b);
+  const common = bucket(0);
+  const unitSyms = (unitNos.length ? unitNos : [0]).map((u, i) => {
+    const own = u === 0 ? { pins: [], shapes: [] } : bucket(u);
+    return { pins: [...(i === 0 ? common.pins : []), ...own.pins], shapes: [...common.shapes, ...own.shapes] };
+  });
+  const pins = unitSyms.flatMap((u) => u.pins);
+  const shapes = unitSyms[0].shapes;
   if (!pins.length) throw new Error("Symbol has no pins");
   const twoPin = pins.length <= 2;
   pins.forEach((p) => {
@@ -201,7 +218,13 @@ export function symbolFromSExpr(sym: SExpr[]): { name: string; refPrefix: string
     refPrefix: (props.get("Reference") ?? "U").replace(/[^A-Za-z#]/g, "") || "U",
     value: props.get("Value") ?? String(sym[1]),
     description: props.get("Description") ?? props.get("ki_description") ?? "",
-    symbol: { shapes: shapes.length ? shapes : icSymbol(pins.map((p) => [p.id, p.name]), []).shapes, pins, refPos: { x: 0, y: minY - 8 }, valuePos: { x: 0, y: Math.max(...ys) + 16 } },
+    symbol: {
+      shapes: shapes.length ? shapes : icSymbol(pins.map((p) => [p.id, p.name]), []).shapes,
+      pins: unitSyms[0].pins,
+      refPos: { x: 0, y: minY - 8 },
+      valuePos: { x: 0, y: Math.max(...ys) + 16 },
+      ...(unitSyms.length > 1 ? { units: unitSyms.slice(1).map((u, i) => ({ name: String.fromCharCode(66 + i), pins: u.pins, shapes: u.shapes })) } : {}),
+    },
     pins: pins.map((p) => ({ id: p.id, name: p.name })),
     power: children(sym, "power").length > 0,
   };

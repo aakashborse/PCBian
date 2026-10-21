@@ -49,6 +49,20 @@ export interface PartSymbol {
   pins: SymbolPin[];
   refPos: Vec;
   valuePos: Vec;
+  /** Further units of a multi-unit part (gates): unit 1 is `shapes`/`pins` above, unit k is units[k-2]. */
+  units?: SymbolUnit[];
+}
+
+/** One extra unit of a multi-unit symbol (e.g. the second op-amp of a dual). */
+export interface SymbolUnit {
+  name?: string;
+  shapes: Shape[];
+  pins: SymbolPin[];
+}
+
+/** Where one unit of a multi-unit part sits on the schematic. */
+export interface UnitPlacement extends Placement {
+  sheet?: string;
 }
 
 export type PadShape = "rect" | "circle" | "oval";
@@ -128,6 +142,10 @@ export interface ComponentData {
   model?: string;
   /** Manufacturer part number for this instance (overrides the library part's, e.g. per value). */
   mpn?: string;
+  /** Placements of units 2..n of a multi-unit part (unit 1 uses `sch` and `sheet`). */
+  units?: UnitPlacement[];
+  /** Set on schematic views of a single unit (see schematicViews): which unit this is. */
+  unit?: number;
 }
 
 export type SpiceModelType = "D" | "NPN" | "PNP" | "NMOS" | "PMOS";

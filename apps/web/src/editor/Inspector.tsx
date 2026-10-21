@@ -3,6 +3,11 @@ import {
   deleteTrace,
   deleteVia,
   getPart,
+  allPins,
+  schematicViews,
+  sheetOf,
+  unitCount,
+  unitRef,
   netByTerminal,
   nextRotation,
   normAngle,
@@ -167,6 +172,18 @@ export function Inspector() {
             </select>
           </div>
         )}
+        {unitCount(part) > 1 && (
+          <div className="field">
+            <label>Units</label>
+            <div className="row" style={{ flexWrap: "wrap", gap: 4 }}>
+              {schematicViews(c).map((v) => (
+                <button key={v.unit} className={`small${selection?.kind === "component" && (selection.unit ?? 1) === v.unit ? " on" : ""}`} onClick={() => select({ kind: "component", id: c.id, ...(v.unit! > 1 ? { unit: v.unit } : {}) })}>
+                  {unitRef(v)} · {design.sheets.find((s) => s.id === sheetOf(design, v))?.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {mode === "schematic" ? (
           <div className="field">
             <label>Rotation</label>
@@ -199,7 +216,7 @@ export function Inspector() {
         {part.kind === "part" && (
           <table className="pin-table">
             <tbody>
-              {part.symbol.pins.map((p) => (
+              {allPins(part).map((p) => (
                 <tr key={p.id}>
                   <td className="muted">{p.id}</td>
                   <td>{p.name}</td>

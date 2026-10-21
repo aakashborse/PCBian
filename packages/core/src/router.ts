@@ -1,7 +1,7 @@
 // Auto-placement and a multi-layer, net-class-aware grid A* auto-router.
 import { analyzeCopper, copperGap, ratsnest, sharedLayers, type CopperItem } from "./copper";
 import { courtyardRect, dist, padDistance, padRect, pointInPolygon, pointSegmentDistance, polygonSpans, type Rect, type WorldPad } from "./geometry";
-import { getPart } from "./library";
+import { allPins, getPart } from "./library";
 import { boardOutline, netRules } from "./doc";
 import { copperLayers } from "./stackup";
 import { computeNets } from "./netlist";
@@ -39,7 +39,7 @@ function clusterPlace(design: Design, margin: number, spacing: number): { placem
     const r = courtyardRect({ ...c, pcb: { ...c.pcb, x: 0, y: 0 } })!;
     return [c.id, { w: r.x1 - r.x0, h: r.y1 - r.y0 }];
   }));
-  const pinCount = (id: string) => getPart(parts.find((c) => c.id === id)!.partId)!.symbol.pins.length;
+  const pinCount = (id: string) => allPins(getPart(parts.find((c) => c.id === id)!.partId)!).length;
 
   // Pairwise attraction weights.
   const weight = new Map<string, Map<string, number>>();

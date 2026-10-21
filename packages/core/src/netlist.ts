@@ -1,4 +1,4 @@
-import { getPart } from "./library";
+import { allPins, getPart } from "./library";
 import type { ComponentData, Design, Net, Terminal } from "./types";
 
 export class UnionFind {
@@ -46,17 +46,17 @@ export function computeNets(design: Design): Net[] {
   for (const c of design.components) {
     const part = getPart(c.partId);
     if (!part) continue;
-    for (const p of part.symbol.pins) {
+    for (const p of allPins(part)) {
       const t = { comp: c.id, pin: p.id };
       allTerms.push(t);
       uf.find(termKey(t));
     }
     const name = c.value.trim();
-    const key0 = part.symbol.pins[0] && termKey({ comp: c.id, pin: part.symbol.pins[0].id });
+    const key0 = allPins(part)[0] && termKey({ comp: c.id, pin: allPins(part)[0].id });
     if (part.kind === "power" || part.kind === "netlabel") uf.union(key0, `G:${name}`);
     else if (part.kind === "locallabel") uf.union(key0, `L:${sheetOfC(c)}:${name}`);
     else if (part.kind === "hierlabel") uf.union(key0, `H:${sheetOfC(c)}:${name}`);
-    else if (part.kind === "sheet") for (const p of part.symbol.pins) uf.union(termKey({ comp: c.id, pin: p.id }), `H:${c.value}:${p.id}`);
+    else if (part.kind === "sheet") for (const p of allPins(part)) uf.union(termKey({ comp: c.id, pin: p.id }), `H:${c.value}:${p.id}`);
   }
   for (const w of design.wires) {
     if (byId.has(w.a.comp) && byId.has(w.b.comp)) uf.union(termKey(w.a), termKey(w.b));

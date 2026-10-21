@@ -75,6 +75,11 @@ import {
   gerberFiles,
   getDesign,
   getPart,
+  allPins,
+  schematicPins,
+  schematicViews,
+  setSchPlacement,
+  unitRef,
   bomCost,
   bomLines,
   bomRisks,
@@ -152,7 +157,7 @@ export const TOOLS = {
     run: (doc, { query }) => {
       const res = searchParts(query, 8, customParts(doc));
       if (!res.length) return "No matching parts. If the component you need is missing, create it with create_part.";
-      return res.map((p) => ({ part_id: p.id, name: p.name, description: p.description, default_value: p.defaultValue, footprint: p.footprint?.name ?? null, pins: p.symbol.pins.map((pin) => `${pin.id}=${pin.name}`).join(", ") }));
+      return res.map((p) => ({ part_id: p.id, name: p.name, description: p.description, default_value: p.defaultValue, footprint: p.footprint?.name ?? null, pins: allPins(p).map((pin) => `${pin.id}=${pin.name}`).join(", ") }));
     },
     label: ({ query }) => `Search parts "${query}"`,
   }),
@@ -185,7 +190,7 @@ export const TOOLS = {
                 ? { type: "qfp" as const, pins: pkg.pins ?? i.pins.length, pitch: pkg.pitch }
                 : { type: pkg.type, pins: pkg.pins ?? i.pins.length };
       const part = addCustomPart(doc, buildPart({ name: i.name, refPrefix: i.ref_prefix, description: i.description, value: i.value, pins: i.pins, package: spec, mpn: i.name, keywords: i.name.toLowerCase().split(/[\s-]+/) }));
-      return { part_id: part.id, footprint: part.footprint?.name, pins: part.symbol.pins.map((p) => `${p.id}=${p.name}`).join(", ") };
+      return { part_id: part.id, footprint: part.footprint?.name, pins: allPins(part).map((p) => `${p.id}=${p.name}`).join(", ") };
     },
     label: ({ name }) => `Create part ${name}`,
   }),
@@ -198,7 +203,15 @@ export const TOOLS = {
       const at = x !== undefined && y !== undefined ? { x: Math.round(x / 10) * 10, y: Math.round(y / 10) * 10 } : freeSchematicSpot(doc);
       const c = addComponent(doc, part_id, at, { value, rot: rotation as Rotation | undefined, sheet: sheetId(doc, sheet) });
       const part = getPart(part_id)!;
-      return { ref: c.ref, value: c.value, at, pins: part.symbol.pins.map((p) => `${p.id}=${p.name}`).join(", ") };
+      const views = schematicViews(c);
+      return {
+        ref: c.ref,
+        value: c.value,
+        at,
+        pins: allPins(part).map((p) => `${p.id}=${p.name}`).join(", "),
+        // Multi-unit parts: each unit is placed on its own (update_component with `unit`).
+        ...(views.length > 1 ? { units: views.map((v) => `${v.unit} ${unitRef(v)}: ${getPart(v.partId)!.symbol.pins.map((p) => `${p.id}=${p.name}`).join(", ")}`) } : {}),
+      };
     },
     label: ({ part_id, value }) => `Add ${getPart(part_id)?.name ?? part_id}${value ? ` (${value})` : ""}`,
   }),
@@ -208,9 +221,12 @@ export const TOOLS = {
     run: (doc, { connections }) =>
       each(connections, ({ from, to }) => {
         const d = getDesign(doc);
-        const a = componentsMap(doc).get(resolveTerminal(doc, from).comp)!;
-        const b = componentsMap(doc).get(resolveTerminal(doc, to).comp)!;
-        if ((a.sheet ?? d.sheets[0].id) !== (b.sheet ?? d.sheets[0].id)) throw new Error("pins are on different sheets; use attach_net with a shared net name instead");
+        // Compare the sheets of the pins themselves: units of one part can sit on different sheets.
+        const sheetOfPin = (spec: string) => {
+          const t = resolveTerminal(doc, spec);
+          return schematicPins(componentsMap(doc).get(t.comp)!).find((p) => p.id === t.pin)?.sheet ?? d.sheets[0].id;
+        };
+        if (sheetOfPin(from) !== sheetOfPin(to)) throw new Error("pins are on different sheets; use attach_net with a shared net name instead");
         connect(doc, from, to);
         return `${from} -> ${to}: ok`;
       }),
@@ -249,11 +265,19 @@ export const TOOLS = {
     label: ({ pin }) => `Disconnect ${pin}`,
   }),
   update_component: tool({
-    description: "Change a component's value, reference, schematic position/rotation/mirror, sheet or do-not-populate flag.",
-    schema: z.object({ ref: z.string(), value: z.string().optional(), new_ref: z.string().optional(), x: z.number().optional(), y: z.number().optional(), rotation: rotation.optional(), mirror: z.boolean().optional(), sheet: z.string().optional(), dnp: z.boolean().optional() }),
-    run: (doc, { ref, value, new_ref, x, y, rotation, mirror, sheet, dnp }) => {
+    description:
+      "Change a component's value, reference, schematic position/rotation/mirror, sheet or do-not-populate flag. For multi-unit parts (dual op-amps, gates; get_component lists their units) give `unit` (1 = A, 2 = B…) to move, rotate or re-sheet that unit alone.",
+    schema: z.object({ ref: z.string(), unit: z.number().int().min(1).optional(), value: z.string().optional(), new_ref: z.string().optional(), x: z.number().optional(), y: z.number().optional(), rotation: rotation.optional(), mirror: z.boolean().optional(), sheet: z.string().optional(), dnp: z.boolean().optional() }),
+    run: (doc, { ref, unit, value, new_ref, x, y, rotation, mirror, sheet, dnp }) => {
       const c = findByRef(doc, ref);
       if (!c) throw new Error(`No component ${ref}`);
+      if (unit && unit > 1) {
+        const v = schematicViews(c).find((x) => x.unit === unit);
+        if (!v) throw new Error(`${ref} has ${schematicViews(c).length} unit(s)`);
+        setSchPlacement(doc, c.id, unit, { x: x ?? v.sch.x, y: y ?? v.sch.y, rot: (rotation ?? v.sch.rot) as Rotation, mirror: mirror ?? v.sch.mirror }, sheet !== undefined ? (sheetId(doc, sheet) ?? null) : undefined);
+        updateComponent(doc, c.id, { ...(value !== undefined && { value }), ...(new_ref !== undefined && { ref: new_ref }), ...(dnp !== undefined && { dnp }) });
+        return "ok";
+      }
       updateComponent(doc, c.id, {
         ...(value !== undefined && { value }),
         ...(new_ref !== undefined && { ref: new_ref }),

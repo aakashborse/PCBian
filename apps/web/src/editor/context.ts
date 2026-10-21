@@ -2,7 +2,8 @@ import type { ChatEntryView, Design, Net, Vec } from "@pcbian/core";
 import { createContext, useContext } from "react";
 import type { ProjectConnection } from "../lib/useProject";
 
-export type Selection = { kind: "component" | "wire" | "trace" | "via" | "zone" | "keepout" | "dimension" | "graphic" | "comment"; id: string } | null;
+/** What is selected; `unit` picks one unit of a multi-unit part on the schematic (default 1). */
+export type Selection = { kind: "component" | "wire" | "trace" | "via" | "zone" | "keepout" | "dimension" | "graphic" | "comment"; id: string; unit?: number } | null;
 export type ViewMode = "schematic" | "pcb" | "3d";
 
 export interface FocusRequest {

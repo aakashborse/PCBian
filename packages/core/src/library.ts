@@ -83,6 +83,33 @@ const fuseBody: Shape[] = [
 ];
 
 /** Rectangular IC symbol. Pins are listed top to bottom on each side as [number, name]. */
+/** One op-amp: triangle with inputs on the left (- above +) and the output on the right. */
+function opampUnit(plus: string, minus: string, out: string, tag: string): { shapes: Shape[]; pins: SymbolPin[] } {
+  return {
+    shapes: [
+      { kind: "polygon", points: [{ x: -20, y: -20 }, { x: -20, y: 20 }, { x: 20, y: 0 }] },
+      { kind: "text", x: -15, y: -7, text: "−", size: 8 },
+      { kind: "text", x: -15, y: 13, text: "+", size: 8 },
+    ],
+    pins: [
+      { id: minus, name: `-IN${tag}`, x: -30, y: -10, side: "left", length: 10, showName: false, showNumber: true, type: "input" },
+      { id: plus, name: `+IN${tag}`, x: -30, y: 10, side: "left", length: 10, showName: false, showNumber: true, type: "input" },
+      { id: out, name: `OUT${tag}`, x: 30, y: 0, side: "right", length: 10, showName: false, showNumber: true, type: "output" },
+    ],
+  };
+}
+
+/** The supply pins of a multi-unit IC as their own small unit. */
+function supplyUnit(vplus: string, vminus: string): { shapes: Shape[]; pins: SymbolPin[] } {
+  return {
+    shapes: [{ kind: "rect", x: -10, y: -10, w: 20, h: 20 }],
+    pins: [
+      { id: vplus, name: "V+", x: 0, y: -20, side: "top", length: 10, showName: true, showNumber: true, type: "power_in" },
+      { id: vminus, name: "V-", x: 0, y: 20, side: "bottom", length: 10, showName: true, showNumber: true, type: "power_in" },
+    ],
+  };
+}
+
 export function icSymbol(left: [string, string][], right: [string, string][], label = ""): PartSymbol {
   const rows = Math.max(left.length, right.length);
   const h = (rows + 1) * 10;
@@ -281,9 +308,15 @@ export const PARTS: PartDef[] = [
     refPrefix: "U",
     defaultValue: "LM358",
     mpn: "LM358DR",
-    symbol: icSymbol([["3", "+INA"], ["2", "-INA"], ["5", "+INB"], ["6", "-INB"]], [["1", "OUTA"], ["7", "OUTB"], ["8", "V+"], ["4", "V-"]], "LM358"),
+    // Three units, as schematics usually draw it: op-amp A, op-amp B and the supply pins.
+    symbol: {
+      ...opampUnit("3", "2", "1", "A"),
+      refPos: { x: 4, y: -24 },
+      valuePos: { x: 4, y: 30 },
+      units: [{ name: "B", ...opampUnit("5", "6", "7", "B") }, { name: "C", ...supplyUnit("8", "4") }],
+    },
     footprint: fp.soic(8),
-    description: "Dual low-power operational amplifier, single supply 3-32V.",
+    description: "Dual low-power operational amplifier, single supply 3-32V. Units A and B are the amplifiers, unit C the supply pins.",
     keywords: ["opamp", "op-amp", "amplifier", "comparator"],
   }),
   part({
@@ -343,7 +376,31 @@ export function registerParts(parts: Iterable<PartDef>) {
 }
 
 export function getPart(id: string): PartDef | undefined {
+  const hash = id.indexOf("#u");
+  if (hash > 0) return unitPart(id.slice(0, hash), Number(id.slice(hash + 2)));
   return BY_ID.get(id) ?? CUSTOM.get(id);
+}
+
+/** Every pin of a part's symbol, across all its units. */
+export const allPins = (part: PartDef): SymbolPin[] => [...part.symbol.pins, ...(part.symbol.units ?? []).flatMap((u) => u.pins)];
+
+/** Number of symbol units of a part (1 for ordinary parts). */
+export const unitCount = (part: PartDef | undefined) => 1 + (part?.symbol.units?.length ?? 0);
+
+const unitCache = new WeakMap<PartDef, Map<number, PartDef>>();
+/** A part as one of its units: the same part with only that unit's symbol ("id#u2"). */
+function unitPart(id: string, unit: number): PartDef | undefined {
+  const part = BY_ID.get(id) ?? CUSTOM.get(id);
+  if (!part || !(unit >= 1 && unit <= unitCount(part))) return undefined;
+  let m = unitCache.get(part);
+  if (!m) unitCache.set(part, (m = new Map()));
+  let p = m.get(unit);
+  if (!p) {
+    const u = unit === 1 ? part.symbol : part.symbol.units![unit - 2];
+    p = { ...part, id: `${id}#u${unit}`, symbol: { ...part.symbol, shapes: u.shapes, pins: u.pins, units: undefined } };
+    m.set(unit, p);
+  }
+  return p;
 }
 
 export function searchParts(query: string, limit = 10, extra: PartDef[] = []): PartDef[] {

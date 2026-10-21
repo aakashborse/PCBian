@@ -19,7 +19,7 @@ import {
   type Rect,
   type WorldPad,
 } from "./geometry";
-import { getPart } from "./library";
+import { allPins, getPart } from "./library";
 import { area, intersection, islandShape } from "./poly";
 import { compileRules, ruleConstraint, type RuleItem, type RuleSet } from "./rules";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
@@ -584,7 +584,7 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
     // A pin is intentionally unconnected if flagged, or if its electrical type is "not connected".
     const isNc = (t: { comp: string; pin: string }) => {
       const c = byId.get(t.comp)!;
-      return (c.noConnect?.includes(t.pin) ?? false) || getPart(c.partId)?.symbol.pins.find((p) => p.id === t.pin)?.type === "nc";
+      return (c.noConnect?.includes(t.pin) ?? false) || ((p) => p && allPins(p))(getPart(c.partId))?.find((p) => p.id === t.pin)?.type === "nc";
     };
     for (const t of phys.filter(isNc)) {
       if (n.terminals.length > 1) {
@@ -595,7 +595,7 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
     // Mounting holes and fiducials may be left floating; they are mechanical, not circuit pins.
     if (n.terminals.length === 1 && phys.length === 1 && !isNc(phys[0]) && getPart(byId.get(phys[0].comp)!.partId)?.category !== "Mechanical") {
       const c = byId.get(phys[0].comp)!;
-      const pin = getPart(c.partId)!.symbol.pins.find((p) => p.id === phys[0].pin);
+      const pin = allPins(getPart(c.partId)!).find((p) => p.id === phys[0].pin);
       issues.push({ severity: "warning", code: "unconnected_pin", message: `${c.ref} pin ${phys[0].pin} (${pin?.name}) is not connected`, refs: [c.ref] });
     } else if (phys.length === 1 && n.named) {
       const c = byId.get(phys[0].comp)!;
@@ -626,7 +626,7 @@ export function pinTypeErc(design: Design, nets: Net[]): Issue[] {
       const c = byId.get(t.comp)!;
       const part = getPart(c.partId)!;
       if (part.kind !== "part" || c.noConnect?.includes(t.pin)) return [];
-      const pin = part.symbol.pins.find((p) => p.id === t.pin);
+      const pin = allPins(part).find((p) => p.id === t.pin);
       return pin ? [{ ref: c.ref, pin: t.pin, name: pin.name, type: (pin.type ?? "passive") as PinType }] : [];
     });
     if (pins.length < 1) continue;

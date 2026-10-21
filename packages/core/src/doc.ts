@@ -168,6 +168,22 @@ export function updateComponent(doc: Y.Doc, id: string, patch: Partial<Omit<Comp
   map.set(id, { ...c, ...patch, sch: { ...c.sch, ...patch.sch }, pcb: { ...c.pcb, ...patch.pcb } });
 }
 
+/** Move, rotate or mirror one unit of a component on the schematic (unit 1 is the component's own placement). */
+export function setSchPlacement(doc: Y.Doc, id: string, unit: number | undefined, sch: Placement, sheet?: string | null) {
+  const map = componentsMap(doc);
+  const c = map.get(id);
+  if (!c) return;
+  const { sheet: _s, ...place } = sch as Placement & { sheet?: string };
+  if (!unit || unit === 1) {
+    map.set(id, { ...c, sch: place, ...(sheet !== undefined ? { sheet: sheet ?? undefined } : {}) });
+    return;
+  }
+  const units = [...(c.units ?? [])];
+  while (units.length < unit - 1) units.push({ x: c.sch.x + 60 * (units.length + 1), y: c.sch.y, rot: c.sch.rot, sheet: c.sheet });
+  units[unit - 2] = { ...place, sheet: sheet !== undefined ? (sheet ?? undefined) : units[unit - 2].sheet };
+  map.set(id, { ...c, units });
+}
+
 export function deleteComponent(doc: Y.Doc, id: string) {
   doc.transact(() => {
     componentsMap(doc).delete(id);

@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { assemblyPdf, computeNets, findByRef, getDesign, importKicadProject, initDoc, netByTerminal, padsOf, ratsnest, schematicPdf, schematicPin, termKey } from "../src";
+import {
+  getPart,
+  schematicPins, assemblyPdf, computeNets, findByRef, getDesign, importKicadProject, initDoc, netByTerminal, padsOf, ratsnest, schematicPdf, schematicPin, termKey } from "../src";
 import { buildTemplate } from "../../../apps/server/src/templates";
 
 const LIB = `(lib_symbols
@@ -62,7 +64,7 @@ describe("KiCad schematic import", () => {
     // GND symbol gives the net its name; PWR_FLAG is ignored.
     expect(n("R1", "2")).toBe("GND");
     expect(d.components.some((c) => c.value === "PWR_FLAG")).toBe(false);
-    // Multi-unit symbol merged; unit B pin marked no-connect.
+    // Multi-unit symbol: one component, units placed where KiCad has them; unit B pin no-connect.
     const u1 = findByRef(doc, "U1")!;
     expect(u1.noConnect).toEqual(["2"]);
     expect(n("U1", "1")).toBe("OUTA");
@@ -73,7 +75,10 @@ describe("KiCad schematic import", () => {
     const p = schematicPin(findByRef(doc, "R2")!, "1")!;
     expect(p.x).toBeCloseTo(73.81 * k, 0);
     expect(p.y).toBeCloseTo(50 * k, 0);
-    expect(rep.warnings.some((w) => /multi-unit/.test(w))).toBe(true);
+    expect(rep.warnings.some((w) => /multi-unit/.test(w))).toBe(false);
+    expect(getPart(u1.partId)!.symbol.units?.length).toBe(1);
+    expect(u1.units).toHaveLength(1);
+    expect(schematicPins(u1).map((x) => x.unit)).toContain(2);
   });
 
   it("imports each instance of a reused sub-sheet with its own references", () => {

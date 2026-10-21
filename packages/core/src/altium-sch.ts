@@ -6,7 +6,7 @@
 // entries) and redrawn as PCBian nets, like the EAGLE importer does.
 import * as CFB from "cfb";
 import type * as Y from "yjs";
-import { addComponent, addSheet, getDesign, updateComponent } from "./doc";
+import { addComponent, addSheet, getDesign, setSchPlacement } from "./doc";
 import { normAngle, pointSegmentDistance, rotate } from "./geometry";
 import { footprintFromName, importBoard, type ImportCtx, type KicadImportReport, type PcbData } from "./kicad-import";
 import { parsePcbDoc } from "./altium-import";
@@ -131,18 +131,19 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
   const pinNode = (si: number, index: number, pin: string) => `pin:${si}:${index}:${pin}`;
   /** PCBian terminal of each Altium pin node. */
   const terminalOf = new Map<string, Terminal>();
-  const compSheet = new Map<string, number>();
+  /** Sheet index each component pin is drawn on (multi-part components can span sheets). */
+  const pinSheet = new Map<string, number>();
   let hiddenPins = 0;
   const missingFootprints: string[] = [];
 
   for (const [ref, parts] of byRef) {
-    // Each placed part contributes its pins and body; gates sit side by side in one symbol.
-    const symbol: PartSymbol = { shapes: [], pins: [], refPos: { x: 0, y: -8 }, valuePos: { x: 0, y: 8 } };
-    let offset = 0;
-    const pinAt: { node: string; id: string }[] = [];
+    // Each placed part (Altium's gates: U1A, U1B…) becomes one unit, in its own frame.
+    const unitSyms: { shapes: Shape[]; pins: SymbolPin[]; pl: Placed }[] = [];
+    const pinAt: { node: string; id: string; sheet: number }[] = [];
     const sorted = [...parts].sort((a, b) => Number(a.rec.CURRENTPARTID ?? 1) - Number(b.rec.CURRENTPARTID ?? 1));
     const main = sorted[0];
     for (const pl of sorted) {
+      const symbol = { shapes: [] as Shape[], pins: [] as SymbolPin[] };
       const s = sheets[pl.sheet];
       const H = sheetHeight(s.recs);
       const P = (x: number, y: number): Vec => ({ x, y: H - y });
@@ -155,13 +156,12 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
       // Sheet -> part frame (inverse of PCBian's mirror-then-rotate placement).
       const local = (w: Vec): Vec => {
         const q = rotate({ x: w.x - L.x, y: w.y - L.y }, -rot);
-        return { x: r4((mirror ? -q.x : q.x) + offset), y: r4(q.y) };
+        return { x: r4(mirror ? -q.x : q.x), y: r4(q.y) };
       };
       const localDir = (d: Vec): Vec => {
         const q = rotate({ x: d.x, y: -d.y }, -rot);
         return { x: mirror ? -q.x : q.x, y: q.y };
       };
-      const start = symbol.pins.length + symbol.shapes.length;
       for (const r of owned) {
         if (r.RECORD === "2") {
           const conglo = Number(r.PINCONGLOMERATE ?? 0);
@@ -169,26 +169,30 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
           const len = u(r, "PINLENGTH");
           const base = { x: u(r, "LOCATION.X"), y: u(r, "LOCATION.Y") };
           const tip = P(base.x + DIRS[o].x * len, base.y + DIRS[o].y * len);
-          const id = r.DESIGNATOR || r.NAME || String(symbol.pins.length + 1);
+          const id = r.DESIGNATOR || r.NAME || String(unitSyms.reduce((n, x) => n + x.pins.length, 0) + symbol.pins.length + 1);
           if (conglo & 4) hiddenPins++;
           const d = localDir(DIRS[o]);
           const side: PinSide = Math.abs(d.x) > Math.abs(d.y) ? (d.x > 0 ? "right" : "left") : d.y < 0 ? "top" : "bottom";
           const at = local(tip);
-          if (!symbol.pins.some((p) => p.id === id)) symbol.pins.push({ id, name: (r.NAME ?? id).replace(/\\/g, ""), x: at.x, y: at.y, side, length: r4(len), showName: Boolean(conglo & 8), showNumber: Boolean(conglo & 16), type: ELECTRICAL[Number(r.ELECTRICAL ?? 4)] ?? "passive" });
+          if (!symbol.pins.some((p) => p.id === id) && !unitSyms.some((x) => x.pins.some((p) => p.id === id))) symbol.pins.push({ id, name: (r.NAME ?? id).replace(/\\/g, ""), x: at.x, y: at.y, side, length: r4(len), showName: Boolean(conglo & 8), showNumber: Boolean(conglo & 16), type: ELECTRICAL[Number(r.ELECTRICAL ?? 4)] ?? "passive" });
           const node = pinNode(pl.sheet, pl.index, id);
-          pinAt.push({ node, id });
+          pinAt.push({ node, id, sheet: pl.sheet });
           sheetPoints(pl.sheet).push({ node, p: tip });
         } else {
           const sh = shapeOf(r, P, local);
           if (sh) symbol.shapes.push(sh);
         }
       }
-      if (symbol.pins.length + symbol.shapes.length === start) continue;
-      // Next gate goes to the right of this one.
-      const xs = [...symbol.pins.map((p) => p.x), ...symbol.shapes.flatMap((sh) => (sh.kind === "line" || sh.kind === "polygon" ? sh.points.map((q) => q.x) : sh.kind === "rect" ? [sh.x, sh.x + sh.w] : sh.kind === "circle" ? [sh.x + sh.r] : []))];
-      offset = Math.max(...xs) + 40;
+      if (symbol.pins.length + symbol.shapes.length) unitSyms.push({ ...symbol, pl });
     }
-    if (!symbol.pins.length) continue;
+    if (!unitSyms.some((x) => x.pins.length)) continue;
+    const symbol: PartSymbol = {
+      shapes: unitSyms[0].shapes,
+      pins: unitSyms[0].pins,
+      refPos: { x: 0, y: -8 },
+      valuePos: { x: 0, y: 8 },
+      ...(unitSyms.length > 1 ? { units: unitSyms.slice(1).map((x, i) => ({ name: String.fromCharCode(66 + i), shapes: x.shapes, pins: x.pins })) } : {}),
+    };
     const s = sheets[main.sheet];
     const params = s.recs.filter((r) => r.RECORD === "41" && Number(r.OWNERINDEX) === main.index);
     const param = (n: string) => params.find((r) => (r.NAME ?? "").toLowerCase() === n.toLowerCase())?.TEXT;
@@ -199,18 +203,21 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
     const footprint = board?.footprint ?? (model ? footprintFromName(model) : null);
     if (!footprint && !/^#/.test(ref)) missingFootprints.push(`${ref} (${model ?? "none"})`);
     const libref = main.rec.LIBREFERENCE ?? main.rec.DESIGNITEMID ?? "Part";
-    if (parts.length > 1) warnings.push(`${ref}: ${parts.length} parts merged into one symbol`);
     const prefix = ref.match(/^[A-Za-z_#]+/)?.[0] ?? "U";
     const sig = JSON.stringify([libref, symbol, footprint]);
     const p = makePart(sig, () => ({ id: uidPart(), name: libref, category: "Imported (Altium)", description: main.rec.COMPONENTDESCRIPTION || libref, kind: "part", refPrefix: prefix, defaultValue: value, keywords: ["altium"], symbol, footprint: footprint && footprint.pads.length ? footprint : null }));
-    const H = sheetHeight(s.recs);
-    const at = { x: r4(u(main.rec, "LOCATION.X")), y: r4(H - u(main.rec, "LOCATION.Y")) };
-    const rot = normAngle(360 - Number(main.rec.ORIENTATION ?? 0) * 90) as Rotation;
-    const sheet = sheetIds[main.sheet];
-    const c = addComponent(doc, p.id, at, { ref, value, rot, sheet: sheet === first ? undefined : sheet, pcb: pcbPlacement(ref) });
-    if (main.rec.ISMIRRORED === "T") updateComponent(doc, c.id, { sch: { ...c.sch, mirror: true } });
-    compSheet.set(c.id, main.sheet);
-    for (const { node, id } of pinAt) terminalOf.set(node, { comp: c.id, pin: id });
+    const c = addComponent(doc, p.id, { x: 0, y: 0 }, { ref, value, pcb: pcbPlacement(ref) });
+    // Each unit where Altium placed it.
+    unitSyms.forEach(({ pl }, i) => {
+      const H = sheetHeight(sheets[pl.sheet].recs);
+      const sheet = sheetIds[pl.sheet];
+      const sch = { x: r4(u(pl.rec, "LOCATION.X")), y: r4(H - u(pl.rec, "LOCATION.Y")), rot: normAngle(360 - Number(pl.rec.ORIENTATION ?? 0) * 90) as Rotation, ...(pl.rec.ISMIRRORED === "T" ? { mirror: true } : {}) };
+      setSchPlacement(doc, c.id, i + 1, sch, sheet === first ? null : sheet);
+    });
+    for (const { node, id, sheet } of pinAt) {
+      terminalOf.set(node, { comp: c.id, pin: id });
+      pinSheet.set(`${c.id}\u0000${id}`, sheet);
+    }
     report.components++;
   }
   if (missingFootprints.length) warnings.push(`${missingFootprints.length} part(s) have no footprint (import the PcbDoc too, or assign them later): ${missingFootprints.slice(0, 5).join(", ")}${missingFootprints.length > 5 ? ", …" : ""}`);
@@ -304,7 +311,7 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
     if (!named.has(root)) named.set(root, name);
     if (!netSheets.has(name)) netSheets.set(name, new Map());
     const by = netSheets.get(name)!;
-    const si = compSheet.get(t.comp) ?? 0;
+    const si = pinSheet.get(`${t.comp}\u0000${t.pin}`) ?? 0;
     if (!by.has(si)) by.set(si, []);
     const list = by.get(si)!;
     if (!list.some((x) => x.comp === t.comp && x.pin === t.pin)) list.push(t);

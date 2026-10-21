@@ -21,9 +21,11 @@ import {
   rotate,
   schematicPin,
   schematicPins,
+  schematicViews,
+  setSchPlacement,
+  unitRef,
   snap,
   termKey,
-  updateComponent,
   type ComponentData,
   type Rotation,
   type Terminal,
@@ -102,13 +104,22 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   useEffect(() => {
     if (selection?.kind !== "component") return;
     const c = design.components.find((x) => x.id === selection.id);
-    if (c && sheetOf(design, c) !== sheet) setSheet(sheetOf(design, c));
+    const v = c && schematicViews(c).find((x) => x.unit === (selection.unit ?? 1));
+    if (v && sheetOf(design, v) !== sheet) setSheet(sheetOf(design, v));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection]);
-  const onSheet = useMemo(() => design.components.filter((c) => sheetOf(design, c) === sheet), [design, sheet]);
-  const onSheetIds = useMemo(() => new Set(onSheet.map((c) => c.id)), [onSheet]);
-  const sheetWires = useMemo(() => design.wires.filter((w) => onSheetIds.has(w.a.comp)), [design.wires, onSheetIds]);
-  const drag = useRef<{ id: string; start: Vec; orig: Vec; moved: boolean } | null>(null);
+  // One entry per symbol unit on this sheet (multi-unit parts can spread over sheets).
+  const onSheet = useMemo(() => design.components.flatMap(schematicViews).filter((c) => sheetOf(design, c) === sheet), [design, sheet]);
+  const onSheetPins = useMemo(() => new Set(onSheet.flatMap((c) => schematicPins(c).map((p) => termKey({ comp: c.id, pin: p.id })))), [onSheet]);
+  const sheetWires = useMemo(() => design.wires.filter((w) => onSheetPins.has(termKey(w.a))), [design.wires, onSheetPins]);
+  const drag = useRef<{ id: string; unit?: number; start: Vec; orig: Vec; moved: boolean } | null>(null);
+  /** The selected unit as drawn (its own placement). */
+  const selectedView = () => {
+    if (selection?.kind !== "component") return undefined;
+    const c = byId.get(selection.id);
+    return c && schematicViews(c).find((v) => v.unit === (selection.unit ?? 1));
+  };
+  const place = (v: ComponentData, sch: ComponentData["sch"]) => setSchPlacement(doc, v.id, v.unit, sch);
   const fitted = useRef(false);
 
   const byId = useMemo(() => new Map(design.components.map((c) => [c.id, c])), [design.components]);
@@ -169,8 +180,8 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
       if (e.key.toLowerCase() === "q" && !e.metaKey && !e.ctrlKey) setNcTool((v) => !v);
       if (e.key === "Enter" && busDraft) finishBus();
       if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey && selection?.kind === "component") {
-        const c = byId.get(selection.id);
-        if (c) updateComponent(doc, c.id, { sch: { ...c.sch, mirror: !c.sch.mirror } });
+        const c = selectedView();
+        if (c) place(c, { ...c.sch, mirror: !c.sch.mirror });
       }
       if (e.key === "Escape") {
         setDrawTool(null);
@@ -185,8 +196,8 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         if (selection.kind === "graphic") deleteSchGraphic(doc, selection.id);
         select(null);
       } else if (e.key.toLowerCase() === "r" && !e.metaKey && !e.ctrlKey && selection?.kind === "component") {
-        const c = byId.get(selection.id);
-        if (c) updateComponent(doc, c.id, { sch: { ...c.sch, rot: nextRotation(c.sch.rot) } });
+        const c = selectedView();
+        if (c) place(c, { ...c.sch, rot: nextRotation(c.sch.rot) });
       } else if (e.key.toLowerCase() === "d" && (e.metaKey || e.ctrlKey) && selection?.kind === "component") {
         e.preventDefault();
         const c = byId.get(selection.id);
@@ -208,10 +219,11 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
     const d = drag.current;
     if (d) {
       const p = toGrid({ x: d.orig.x + w.x - d.start.x, y: d.orig.y + w.y - d.start.y });
-      const c = byId.get(d.id);
+      const c0 = byId.get(d.id);
+      const c = c0 && schematicViews(c0).find((v) => v.unit === (d.unit ?? 1));
       if (c && (p.x !== c.sch.x || p.y !== c.sch.y)) {
         d.moved = true;
-        updateComponent(doc, d.id, { sch: { ...c.sch, x: p.x, y: p.y } });
+        place(c, { ...c.sch, x: p.x, y: p.y });
       }
     }
   };
@@ -292,9 +304,9 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   const onComponentDown = (e: React.PointerEvent, c: ComponentData) => {
     if (e.button !== 0 || placing || wiring) return;
     e.stopPropagation();
-    select({ kind: "component", id: c.id });
+    select({ kind: "component", id: c.id, ...(c.unit && c.unit > 1 ? { unit: c.unit } : {}) });
     undo.stopCapturing();
-    drag.current = { id: c.id, start: vp.toWorld(e.clientX, e.clientY), orig: { x: c.sch.x, y: c.sch.y }, moved: false };
+    drag.current = { id: c.id, unit: c.unit, start: vp.toWorld(e.clientX, e.clientY), orig: { x: c.sch.x, y: c.sch.y }, moved: false };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
   };
 
@@ -395,7 +407,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
             const remote = remoteSel.get(c.id);
             return (
               <g
-                key={c.id}
+                key={`${c.id}:${c.unit}`}
                 transform={`translate(${c.sch.x},${c.sch.y})`}
                 onPointerDown={(e) => onComponentDown(e, c)}
                 onDoubleClick={() => part.kind === "sheet" && design.sheets.some((x) => x.id === c.value) && setSheet(c.value)}
@@ -408,7 +420,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
                 {part.kind === "part" && (
                   <>
                     <text x={vertical ? b.x1 + 3 : refP.x} y={vertical ? -3 : refP.y} fontSize={9} fontWeight={600} fill={COLORS.text} textAnchor={vertical ? "start" : part.symbol.pins.length > 3 ? "start" : "middle"}>
-                      {c.ref}
+                      {unitRef(c)}
                     </text>
                     <text x={vertical ? b.x1 + 3 : valP.x} y={vertical ? 9 : valP.y} fontSize={8} fill="#4b5563" textAnchor={vertical ? "start" : part.symbol.pins.length > 3 ? "start" : "middle"}>
                       {c.value}
@@ -541,14 +553,14 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         </button>
         <span className="sep" />
         <button disabled={selection?.kind !== "component"} onClick={() => {
-          const c = selection && byId.get(selection.id);
-          if (c) updateComponent(doc, c.id, { sch: { ...c.sch, rot: nextRotation(c.sch.rot) } });
+          const c = selectedView();
+          if (c) place(c, { ...c.sch, rot: nextRotation(c.sch.rot) });
         }} title="Rotate (R)">
           Rotate
         </button>
         <button disabled={selection?.kind !== "component"} onClick={() => {
-          const c = selection && byId.get(selection.id);
-          if (c) updateComponent(doc, c.id, { sch: { ...c.sch, mirror: !c.sch.mirror } });
+          const c = selectedView();
+          if (c) place(c, { ...c.sch, mirror: !c.sch.mirror });
         }} title="Mirror (M)">
           Mirror
         </button>

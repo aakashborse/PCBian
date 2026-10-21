@@ -5,7 +5,7 @@ import type * as Y from "yjs";
 import { addComponent, addSheet, componentsMap, getDesign, updateComponent } from "./doc";
 import { drawImportedNets } from "./netdraw";
 import { importBoard, type ImportCtx, type KicadImportReport, type PcbData, type PcbFootprint } from "./kicad-import";
-import { normAngle, rotate } from "./geometry";
+import { normAngle, rotate, schematicPins } from "./geometry";
 import type { CopperLayer, Footprint, Pad, PartSymbol, PinSide, Rotation, Shape, SymbolPin, Terminal, Vec } from "./types";
 import { parseXml, xkid, xkids, xpath, type XmlNode } from "./xml";
 
@@ -257,16 +257,18 @@ const PIN_LEN: Record<string, number> = { point: 0, short: 2.54, middle: 5.08, l
 const PIN_TYPE: Record<string, SymbolPin["type"]> = { in: "input", out: "output", io: "bidirectional", oc: "open_collector", hiz: "tristate", pas: "passive", pwr: "power_in", sup: "power_out", nc: "nc" };
 
 /** PCBian symbol from the gates of an Eagle device (gates side by side), pins keyed by pad. */
-function deviceSymbol(ds: XmlNode, lib: string, symbols: Map<string, XmlNode>, connects: Map<string, string[]>): { symbol: PartSymbol; pinPads: Map<string, string[]> } {
-  const shapes: Shape[] = [];
-  const pins: SymbolPin[] = [];
+/** A device's symbol: one unit per gate (each in its own frame), and the pads behind each gate pin. */
+function deviceSymbol(ds: XmlNode, lib: string, symbols: Map<string, XmlNode>, connects: Map<string, string[]>): { symbol: PartSymbol; pinPads: Map<string, string[]>; gates: string[] } {
   const pinPads = new Map<string, string[]>();
+  const units: { name: string; shapes: Shape[]; pins: SymbolPin[] }[] = [];
   const gates = xkids(xkid(ds, "gates"), "gate");
   for (const g of gates) {
     const sym = symbols.get(`${lib}:${g.attrs.symbol}`);
     if (!sym) continue;
-    const off = { x: num(g, "x"), y: num(g, "y") };
-    const P = (x: number, y: number): Vec => ({ x: r4((x + off.x) * SK), y: r4(-(y + off.y) * SK) });
+    const shapes: Shape[] = [];
+    const pins: SymbolPin[] = [];
+    units.push({ name: g.attrs.name, shapes, pins });
+    const P = (x: number, y: number): Vec => ({ x: r4(x * SK), y: r4(-y * SK) });
     for (const w of xkids(sym, "wire")) if (w.attrs.layer === "94") shapes.push({ kind: "line", points: wirePoints(w).map((p) => P(p.x, p.y)) });
     for (const r of xkids(sym, "rectangle")) {
       const a = P(num(r, "x1"), num(r, "y1"));
@@ -289,7 +291,10 @@ function deviceSymbol(ds: XmlNode, lib: string, symbols: Map<string, XmlNode>, c
       pinPads.set(`${g.attrs.name}\u0000${p.attrs.name}`, pads);
     }
   }
-  return { symbol: { shapes, pins, refPos: { x: 0, y: -12 }, valuePos: { x: 0, y: 14 } }, pinPads };
+  // Gates without pins (e.g. a supply gate whose pads are all elsewhere) still get a unit so the
+  // gate list and the units stay aligned.
+  const [u1, ...rest] = units.length ? units : [{ name: "", shapes: [], pins: [] }];
+  return { symbol: { shapes: u1.shapes, pins: u1.pins, refPos: { x: 0, y: -12 }, valuePos: { x: 0, y: 14 }, ...(rest.length ? { units: rest } : {}) }, pinPads, gates: units.map((u) => u.name) };
 }
 
 function importEagleSchematic(ctx: ImportCtx, text: string) {
@@ -307,9 +312,13 @@ function importEagleSchematic(ctx: ImportCtx, text: string) {
 
   // Parts -> components (placed at their first gate instance).
   const compOf = new Map<string, { id: string; pinPads: Map<string, string[]> }>();
-  const firstInstance = new Map<string, { sheet: number; at: Vec; rot: { mirror: boolean; angle: number } }>();
+  // Where each gate of each part is placed.
+  const instances = new Map<string, { sheet: number; at: Vec; rot: { mirror: boolean; angle: number } }>();
   sheets.forEach((s, si) => {
-    for (const inst of xkids(xkid(s, "instances"), "instance")) if (!firstInstance.has(inst.attrs.part)) firstInstance.set(inst.attrs.part, { sheet: si, at: { x: num(inst, "x"), y: num(inst, "y") }, rot: parseRot(inst.attrs.rot) });
+    for (const inst of xkids(xkid(s, "instances"), "instance")) {
+      const k = `${inst.attrs.part}\u0000${inst.attrs.gate}`;
+      if (!instances.has(k)) instances.set(k, { sheet: si, at: { x: num(inst, "x"), y: num(inst, "y") }, rot: parseRot(inst.attrs.rot) });
+    }
   });
   for (const part of xkids(xkid(sch, "parts"), "part")) {
     const ds = libs.devicesets.get(`${part.attrs.library}:${part.attrs.deviceset}`);
@@ -319,22 +328,28 @@ function importEagleSchematic(ctx: ImportCtx, text: string) {
     if (!dev.attrs.package) continue;
     const connects = new Map<string, string[]>();
     for (const c of xkids(xkid(dev, "connects"), "connect")) connects.set(`${c.attrs.gate}\u0000${c.attrs.pin}`, c.attrs.pad.split(/\s+/).filter(Boolean));
-    const { symbol, pinPads } = deviceSymbol(ds, part.attrs.library, libs.symbols, connects);
+    const { symbol, pinPads, gates } = deviceSymbol(ds, part.attrs.library, libs.symbols, connects);
     const board = pcbByRef.get(part.attrs.name);
     const pkg = libs.pkgs.get(`${part.attrs.library}:${dev.attrs.package}`);
     const footprint = board?.footprint ?? (pkg ? footprintFromPackage(pkg.name, pkg.node) : null);
     if (!footprint) warnings.push(`${part.attrs.name}: package ${dev.attrs.package} not found`);
-    const gates = xkids(xkid(ds, "gates"), "gate").length;
-    if (gates > 1) warnings.push(`${part.attrs.name}: ${gates} gates merged into one symbol`);
     const prefix = ds.attrs.prefix || (part.attrs.name.match(/^[A-Za-z]+/)?.[0] ?? "U");
     const sig = JSON.stringify([part.attrs.library, part.attrs.deviceset, part.attrs.device, footprint]);
     const p = makePart(sig, () => ({ id: uidPart(), name: `${part.attrs.deviceset}${part.attrs.device ? `-${part.attrs.device}` : ""}`, category: "Imported (EAGLE)", description: `${part.attrs.deviceset} (${part.attrs.library})`, kind: "part", refPrefix: prefix, defaultValue: part.attrs.value ?? part.attrs.deviceset, keywords: ["eagle"], symbol, footprint: footprint && footprint.pads.length ? footprint : null }));
-    const inst = firstInstance.get(part.attrs.name);
-    const at = inst ? { x: r4(inst.at.x * SK), y: r4(-inst.at.y * SK) } : { x: 0, y: 0 };
-    const rot = inst ? round90(360 - inst.rot.angle) : 0;
-    const sheet = sheetIds[inst?.sheet ?? 0];
-    const c = addComponent(doc, p.id, at, { ref: part.attrs.name, value: part.attrs.value ?? part.attrs.deviceset, rot, sheet: sheet === first ? undefined : sheet, pcb: pcbPlacement(part.attrs.name) });
-    if (inst?.rot.mirror) updateComponent(doc, c.id, { sch: { x: at.x, y: at.y, rot, mirror: true } });
+    // One placement per gate (unit); gates that were never placed sit beside the first one.
+    const places = gates.map((g, i) => {
+      const inst = instances.get(`${part.attrs.name}\u0000${g}`);
+      const at = inst ? { x: r4(inst.at.x * SK), y: r4(-inst.at.y * SK) } : null;
+      const sheet = sheetIds[inst?.sheet ?? 0];
+      return { at, rot: inst ? round90(360 - inst.rot.angle) : (0 as Rotation), mirror: Boolean(inst?.rot.mirror), sheet: sheet === first ? undefined : sheet, i };
+    });
+    const p0 = places[0] ?? { at: null, rot: 0 as Rotation, mirror: false, sheet: undefined };
+    const at0 = p0.at ?? { x: 0, y: 0 };
+    const c = addComponent(doc, p.id, at0, { ref: part.attrs.name, value: part.attrs.value ?? part.attrs.deviceset, rot: p0.rot, sheet: p0.sheet, pcb: pcbPlacement(part.attrs.name) });
+    updateComponent(doc, c.id, {
+      sch: { x: at0.x, y: at0.y, rot: p0.rot, ...(p0.mirror ? { mirror: true } : {}) },
+      ...(places.length > 1 ? { units: places.slice(1).map((q) => ({ x: q.at?.x ?? at0.x + 60 * q.i, y: q.at?.y ?? at0.y, rot: q.rot, ...(q.mirror ? { mirror: true } : {}), sheet: q.at ? q.sheet : p0.sheet })) } : {}),
+    });
     compOf.set(part.attrs.name, { id: c.id, pinPads });
   }
 
@@ -350,7 +365,9 @@ function importEagleSchematic(ctx: ImportCtx, text: string) {
           if (!netSheets.has(net.attrs.name)) netSheets.set(net.attrs.name, new Map());
           const bySheet = netSheets.get(net.attrs.name)!;
           const owner = componentsMap(doc).get(comp.id)!;
-          const sIdx = Math.max(0, sheetIds.indexOf(owner.sheet ?? first));
+          // The sheet this pin's gate (unit) is drawn on.
+          const pinSheet = schematicPins(owner).find((x) => x.id === pads[0])?.sheet;
+          const sIdx = Math.max(0, sheetIds.indexOf(pinSheet ?? first));
           if (!bySheet.has(sIdx)) bySheet.set(sIdx, []);
           for (const pad of pads) bySheet.get(sIdx)!.push({ comp: comp.id, pin: pad });
         }

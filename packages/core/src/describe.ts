@@ -1,7 +1,8 @@
 // Compact, human/LLM-readable description of a design.
 import { runDrc, runErc } from "./copper";
 import { netRules, sheetOf } from "./doc";
-import { getPart } from "./library";
+import { allPins, getPart } from "./library";
+import { schematicViews } from "./geometry";
 import { computeNets } from "./netlist";
 import type { Design } from "./types";
 
@@ -18,10 +19,12 @@ export function describeDesign(design: Design): string {
   if (!sorted.length) lines.push("  (none)");
   for (const c of sorted) {
     const part = getPart(c.partId);
-    const pins = part?.symbol.pins.map((p) => (p.name === p.id ? p.id : `${p.id}=${p.name}`)).join(", ");
+    const pins = (part ? allPins(part) : []).map((p) => (p.name === p.id ? p.id : `${p.id}=${p.name}`)).join(", ");
     const pcb = part?.footprint ? ` | pcb ${c.pcb.x.toFixed(2)},${c.pcb.y.toFixed(2)},${c.pcb.rot},${c.pcb.side}` : "";
     const nc = c.noConnect?.length ? ` | no-connect: ${c.noConnect.join(",")}` : "";
-    lines.push(`  ${c.ref} | ${c.partId} | ${c.value} | ${sheetOf(design, c)} | sch ${c.sch.x},${c.sch.y},${c.sch.rot}${pcb} | pins: ${pins}${nc}${c.dnp ? " | DNP" : ""}`);
+    const views = schematicViews(c);
+    const units = views.length > 1 ? ` | units: ${views.slice(1).map((v) => `${v.unit} on ${sheetOf(design, v)} at ${v.sch.x},${v.sch.y},${v.sch.rot}`).join("; ")}` : "";
+    lines.push(`  ${c.ref} | ${c.partId} | ${c.value} | ${sheetOf(design, c)} | sch ${c.sch.x},${c.sch.y},${c.sch.rot}${pcb} | pins: ${pins}${units}${nc}${c.dnp ? " | DNP" : ""}`);
   }
   lines.push("", "Nets (only nets with 2+ connections; format REF.pin):");
   let any = false;

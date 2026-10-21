@@ -1,7 +1,7 @@
 // Minimal vector PDF writer (Helvetica, lines, rectangles, circles, text) plus the
 // schematic and assembly-drawing exports built on it.
 import { boardOutline, sheetOf } from "./doc";
-import { courtyardRect, rotate, toWorld } from "./geometry";
+import { courtyardRect, rotate, schematicPins, schematicViews, toWorld, unitRef } from "./geometry";
 import { getPart } from "./library";
 import type { Design, Shape, Vec } from "./types";
 
@@ -206,11 +206,12 @@ export function schematicSvgs(design: Design): { sheet: string; svg: string }[] 
 function drawSchematicSheet(page: DrawPage, design: Design, sheet: Design["sheets"][number]) {
   const byId = new Map(design.components.map((c) => [c.id, c]));
   {
-    const comps = design.components.filter((c) => sheetOf(design, c) === sheet.id);
+    // One entry per symbol unit drawn on this sheet.
+    const comps = design.components.flatMap(schematicViews).filter((c) => sheetOf(design, c) === sheet.id);
     const pinPos = (compId: string, pin: string) => {
       const c = byId.get(compId);
-      const p = c && getPart(c.partId)?.symbol.pins.find((x) => x.id === pin);
-      return c && p ? toWorld(p, c.sch, Boolean(c.sch.mirror)) : null;
+      const p = c && schematicPins(c).find((x) => x.id === pin);
+      return p && (p.sheet ?? design.sheets[0].id) === sheet.id ? p.world : null;
     };
     // Bounds of everything on the sheet.
     const pts: Vec[] = [];
@@ -285,7 +286,7 @@ function drawSchematicSheet(page: DrawPage, design: Design, sheet: Design["sheet
       if (part.kind === "part") {
         const rp = map({ x: c.sch.x + rotate(part.symbol.refPos, c.sch.rot).x, y: c.sch.y + rotate(part.symbol.refPos, c.sch.rot).y });
         const vp = map({ x: c.sch.x + rotate(part.symbol.valuePos, c.sch.rot).x, y: c.sch.y + rotate(part.symbol.valuePos, c.sch.rot).y });
-        page.text(rp.x, rp.y, 8.5 * k, c.ref, "start", [0.12, 0.16, 0.22]);
+        page.text(rp.x, rp.y, 8.5 * k, unitRef(c), "start", [0.12, 0.16, 0.22]);
         page.text(vp.x, vp.y, 7.5 * k, c.value + (c.dnp ? " (DNP)" : ""), "start", [0.3, 0.33, 0.38]);
       } else {
         const vp = tf(part.symbol.valuePos);

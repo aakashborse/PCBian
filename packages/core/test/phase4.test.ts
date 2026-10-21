@@ -3,6 +3,12 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   addComponent,
+  addSheet,
+  attachNet,
+  schematicPins,
+  schematicViews,
+  setSchPlacement,
+  unitRef,
   addZone,
   bestOffer,
   bomCost,
@@ -203,5 +209,31 @@ describe("supplier data (Mouser)", () => {
     const csv = bomCsv(d, { offers, boards: 10 });
     expect(csv.split("\n")[0]).toContain("Unit price");
     expect(csv).toContain('"603-RC0603FR-0710KL","1250000","active","20","0.013","0.26","USD",""');
+  });
+});
+
+describe("multi-unit parts", () => {
+  it("places units separately, across sheets, with one footprint", () => {
+    const doc = newDoc();
+    const sheet2 = addSheet(doc, "Channel B");
+    const u = addComponent(doc, "lm358_soic8", { x: 100, y: 100 });
+    // Unit B goes to the second sheet.
+    setSchPlacement(doc, u.id, 2, { x: 300, y: 200, rot: 90 }, sheet2.id);
+    const c = findByRef(doc, "U1")!;
+    const views = schematicViews(c);
+    expect(views.map((v) => [v.unit, unitRef(v), v.sheet])).toEqual([
+      [1, "U1A", undefined],
+      [2, "U1B", sheet2.id],
+      [3, "U1C", undefined],
+    ]);
+    const pins = schematicPins(c);
+    expect(pins).toHaveLength(8);
+    expect(pins.find((p) => p.id === "7")).toMatchObject({ unit: 2, sheet: sheet2.id });
+    // Unit B's output at (30,0) local, rotated 90° clockwise about (300,200).
+    expect(pins.find((p) => p.id === "7")!.world).toEqual({ x: 300, y: 230 });
+    // A net label on a unit-B pin lands on unit B's sheet.
+    const label = attachNet(doc, "U1.7", "OUTB");
+    expect(label.sheet).toBe(sheet2.id);
+    expect(padsOf(c)).toHaveLength(8);
   });
 });

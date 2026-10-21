@@ -3,7 +3,7 @@
 import type * as Y from "yjs";
 import { addComponent, addWire, componentsMap, wiresMap } from "./doc";
 import { schematicPins } from "./geometry";
-import { getPart } from "./library";
+import { allPins, getPart } from "./library";
 import type { ComponentData, Terminal, Vec } from "./types";
 
 export function findByRef(doc: Y.Doc, ref: string): ComponentData | undefined {
@@ -19,7 +19,7 @@ export function resolveTerminal(doc: Y.Doc, spec: string): Terminal {
   const pinSpec = spec.slice(dot + 1).trim();
   const comp = findByRef(doc, ref);
   if (!comp) throw new Error(`No component with reference ${ref}`);
-  const pins = getPart(comp.partId)!.symbol.pins;
+  const pins = allPins(getPart(comp.partId)!);
   const byNum = pins.find((p) => p.id.toUpperCase() === pinSpec.toUpperCase());
   if (byNum) return { comp: comp.id, pin: byNum.id };
   const byName = pins.filter((p) => p.name.toUpperCase() === pinSpec.toUpperCase() || p.name.toUpperCase().split("/").includes(pinSpec.toUpperCase()));
@@ -64,13 +64,15 @@ export function attachNet(doc: Y.Doc, spec: string, net: string, scope: LabelSco
   const kind = scope === "auto" ? (isPowerName(net) ? "power" : "global") : scope;
   const partId = kind === "power" ? (isGnd ? "power_gnd" : "power_rail") : kind === "global" ? "net_label" : kind === "local" ? "local_label" : "hier_label";
   // schematicPins() already reports the side after mirroring; rotate it into world space.
-  const dir = rotateDir(SIDE_DIR[pin.side], comp.sch.rot);
+  // A multi-unit part's pin follows its own unit's placement.
+  const unitSch = pin.unit > 1 ? (comp.units?.[pin.unit - 2] ?? comp.sch) : comp.sch;
+  const dir = rotateDir(SIDE_DIR[pin.side], unitSch.rot);
   const at =
     kind === "power"
       ? { x: pin.world.x + dir.x * 20, y: pin.world.y + dir.y * 20 + (dir.y === 0 ? (isGnd ? 20 : -20) : 0) }
       : { x: pin.world.x + dir.x * 20, y: pin.world.y + dir.y * 20 };
   // Labels point away from the part: mirror them when they sit on the left of the pin.
-  const sym = addComponent(doc, partId, { x: Math.round(at.x / 10) * 10, y: Math.round(at.y / 10) * 10 }, { value: net, sheet: comp.sheet });
+  const sym = addComponent(doc, partId, { x: Math.round(at.x / 10) * 10, y: Math.round(at.y / 10) * 10 }, { value: net, sheet: pin.sheet });
   if (kind !== "power" && dir.x < 0) updateMirror(doc, sym.id);
   addWire(doc, t, { comp: sym.id, pin: "1" });
   return sym;
