@@ -5,7 +5,7 @@ import type * as Y from "yjs";
 import { addComponent, addSheet, addWire, componentsMap, getDesign, updateComponent } from "./doc";
 import { attachNet, isPowerName, type LabelScope } from "./edit";
 import { importBoard, type ImportCtx, type KicadImportReport, type PcbData, type PcbFootprint } from "./kicad-import";
-import { rotate, schematicPin } from "./geometry";
+import { normAngle, rotate, schematicPin } from "./geometry";
 import type { CopperLayer, Footprint, Pad, PartSymbol, PinSide, Rotation, Shape, SymbolPin, Terminal, Vec } from "./types";
 import { parseXml, xkid, xkids, xpath, type XmlNode } from "./xml";
 
@@ -19,6 +19,13 @@ const num = (n: XmlNode, k: string, d = 0) => (n.attrs[k] !== undefined && n.att
 /** mm -> schematic units (10 units = 2.54 mm). */
 const SK = 10 / 2.54;
 const round90 = (deg: number) => ((((Math.round(deg / 90) * 90) % 360) + 360) % 360) as Rotation;
+/** A pad's own Eagle rotation: quarter turns swap the size; other angles become the pad's rotation
+ * in PCBian's y-down footprint frame (where Eagle's counter-clockwise turns read clockwise-negative). */
+function padTurn(angle: number): { swap: boolean; rot?: number } {
+  const q = Math.round(angle / 90);
+  if (Math.abs(angle - q * 90) < 0.01) return { swap: q % 2 !== 0 };
+  return { swap: false, rot: normAngle(-angle) };
+}
 
 /** Eagle rotation attribute: "R90", "MR180", "SMR45". */
 function parseRot(rot: string | undefined) {
@@ -64,34 +71,32 @@ interface EaglePackage {
 
 /** Pads of a package in Eagle package coordinates (y up), with their own rotation applied to the size. */
 function packagePads(pkg: XmlNode) {
-  const out: { id: string; at: Vec; w: number; h: number; shape: Pad["shape"]; drill?: number; bottom: boolean }[] = [];
+  const out: { id: string; at: Vec; w: number; h: number; shape: Pad["shape"]; drill?: number; bottom: boolean; rot?: number }[] = [];
   for (const s of xkids(pkg, "smd")) {
-    const r = parseRot(s.attrs.rot);
-    const swap = Math.round(r.angle / 90) % 2 !== 0;
+    const { swap, rot } = padTurn(parseRot(s.attrs.rot).angle);
     const dx = num(s, "dx");
     const dy = num(s, "dy");
     const round = num(s, "roundness");
     const [w, h] = swap ? [dy, dx] : [dx, dy];
-    out.push({ id: s.attrs.name, at: { x: num(s, "x"), y: num(s, "y") }, w, h, shape: round >= 100 ? (Math.abs(w - h) < 1e-6 ? "circle" : "oval") : "rect", bottom: s.attrs.layer === "16" });
+    out.push({ id: s.attrs.name, at: { x: num(s, "x"), y: num(s, "y") }, w, h, shape: round >= 100 ? (Math.abs(w - h) < 1e-6 ? "circle" : "oval") : "rect", bottom: s.attrs.layer === "16", rot });
   }
   for (const p of xkids(pkg, "pad")) {
     const drill = num(p, "drill");
     // Eagle "auto" diameter: drill plus a 25% (min 0.25mm) restring each side.
     const dia = num(p, "diameter") || drill + 2 * Math.max(0.25, drill * 0.25);
     const shape = p.attrs.shape ?? "round";
-    const r = parseRot(p.attrs.rot);
-    const swap = Math.round(r.angle / 90) % 2 !== 0;
+    const { swap, rot } = padTurn(parseRot(p.attrs.rot).angle);
     let w = dia;
     let h = dia;
     if (shape === "long" || shape === "offset") [w, h] = swap ? [dia, 2 * dia] : [2 * dia, dia];
-    out.push({ id: p.attrs.name, at: { x: num(p, "x"), y: num(p, "y") }, w, h, shape: shape === "square" ? "rect" : shape === "long" || shape === "offset" ? "oval" : "circle", drill, bottom: false });
+    out.push({ id: p.attrs.name, at: { x: num(p, "x"), y: num(p, "y") }, w, h, shape: shape === "square" ? "rect" : shape === "long" || shape === "offset" ? "oval" : "circle", drill, bottom: false, rot });
   }
   return out;
 }
 
 /** Footprint in PCBian's frame (y down) straight from the package, for schematic-only imports. */
 function footprintFromPackage(name: string, pkg: XmlNode): Footprint {
-  const pads: Pad[] = packagePads(pkg).map((p) => ({ id: p.id, x: r4(p.at.x), y: r4(-p.at.y), w: r4(p.w), h: r4(p.h), shape: p.shape, ...(p.drill ? { drill: p.drill } : {}) }));
+  const pads: Pad[] = packagePads(pkg).map((p) => ({ id: p.id, x: r4(p.at.x), y: r4(-p.at.y), w: r4(p.w), h: r4(p.h), shape: p.shape, ...(p.rot !== undefined ? { rot: p.rot } : {}), ...(p.drill ? { drill: p.drill } : {}) }));
   const silk: Shape[] = xkids(pkg, "wire")
     .filter((w) => w.attrs.layer === "21")
     .map((w) => ({ kind: "line" as const, points: wirePoints(w).map((p) => ({ x: r4(p.x), y: r4(-p.y) })) }));
@@ -146,33 +151,27 @@ function parseBoard(text: string, warnings: string[]): PcbData {
       continue;
     }
     const rot = parseRot(e.attrs.rot);
-    if (Math.abs(rot.angle % 90) > 0.01) warnings.push(`${e.attrs.name}: rotation ${rot.angle}° rounded to a multiple of 90°`);
     const at = { x: num(e, "x"), y: num(e, "y") };
     const side = rot.mirror ? "bottom" : "top";
-    const pcbRot = round90(360 - rot.angle);
+    const pcbRot = normAngle(360 - rot.angle);
     const pos = flip(at);
     // World pads (y down) -> PCBian footprint-local frame, exactly like the KiCad importer.
     const toLocal = (w: Vec): Vec => {
-      const l = rotate({ x: w.x - pos.x, y: w.y - pos.y }, ((360 - pcbRot) % 360) as Rotation);
+      const l = rotate({ x: w.x - pos.x, y: w.y - pos.y }, -pcbRot);
       return { x: r4(side === "bottom" ? -l.x : l.x), y: r4(l.y) };
     };
-    const swapFp = pcbRot % 180 !== 0;
     const pads: Pad[] = [];
     const nets = new Map<string, string>();
     for (const p of packagePads(pkg.node)) {
-      const world = flip(xf(p.at, at, { mirror: rot.mirror, angle: Math.round(rot.angle / 90) * 90 }));
-      // Pad size in world orientation, then back into the footprint frame.
-      const swapW = Math.round(rot.angle / 90) % 2 !== 0;
-      const [ww, wh] = swapW ? [p.h, p.w] : [p.w, p.h];
-      const [w, h] = swapFp ? [wh, ww] : [ww, wh];
-      const l = toLocal(world);
-      pads.push({ id: p.id, x: l.x, y: l.y, w: r4(w), h: r4(h), shape: p.shape, ...(p.drill ? { drill: p.drill } : {}) });
+      // The footprint frame is the package frame flipped to y-down, so pad sizes and turns carry over.
+      const l = toLocal(flip(xf(p.at, at, rot)));
+      pads.push({ id: p.id, x: l.x, y: l.y, w: r4(p.w), h: r4(p.h), shape: p.shape, ...(p.rot !== undefined ? { rot: p.rot } : {}), ...(p.drill ? { drill: p.drill } : {}) });
       const net = padNet.get(`${e.attrs.name}\u0000${p.id}`);
       if (net) nets.set(p.id, net);
     }
     const silk: Shape[] = xkids(pkg.node, "wire")
       .filter((w) => w.attrs.layer === "21" || w.attrs.layer === "22")
-      .map((w) => ({ kind: "line" as const, points: wirePoints(w).map((p) => toLocal(flip(xf(p, at, { mirror: rot.mirror, angle: Math.round(rot.angle / 90) * 90 })))) }));
+      .map((w) => ({ kind: "line" as const, points: wirePoints(w).map((p) => toLocal(flip(xf(p, at, rot)))) }));
     footprints.push({ ref: e.attrs.name, value: e.attrs.value ?? "", lib: `${e.attrs.library}:${pkg.name}`, placement: { x: pos.x, y: pos.y, rot: pcbRot, side }, footprint: { name: pkg.name, pads, silk, courtyard: courtyardOf(pads, silk) }, nets });
   }
 

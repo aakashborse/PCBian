@@ -188,14 +188,14 @@ export function Board3D() {
           g.add(hole);
         } else {
           const y = c.pcb.side === "top" ? 0.025 : -T - 0.025;
-          box(p.ww, 0.05, p.wh, gold, p.world.x, y, p.world.y);
+          box(p.ww, 0.05, p.wh, gold, p.world.x, y, p.world.y).rotation.y = (-p.angle * Math.PI) / 180;
         }
       }
       if (c.dnp) continue;
       const st = bodyStyle(c);
-      const swap = c.pcb.rot === 90 || c.pcb.rot === 270;
-      const cw = (swap ? part.footprint.courtyard.h : part.footprint.courtyard.w) * (st.scale ?? 0.75);
-      const ch = (swap ? part.footprint.courtyard.w : part.footprint.courtyard.h) * (st.scale ?? 0.75);
+      // Bodies are built in the footprint frame and turned with the part (any angle).
+      const cw = part.footprint.courtyard.w * (st.scale ?? 0.75);
+      const ch = part.footprint.courtyard.h * (st.scale ?? 0.75);
       const dir = c.pcb.side === "top" ? 1 : -1;
       const base = c.pcb.side === "top" ? 0.05 : -T - 0.05;
       const bodyMat = mat(st.color, c.partId.startsWith("led") ? { transparent: true, opacity: 0.85, emissive: st.color, emissiveIntensity: 0.25 } : st.color === 0xc0c7d1 || st.color === 0xd1d5db ? { metalness: 0.8, roughness: 0.3 } : {});
@@ -205,7 +205,7 @@ export function Board3D() {
         cyl.position.set(c.pcb.x, base + (dir * st.h) / 2, c.pcb.y);
         g.add(cyl);
       } else {
-        box(cw, st.h, ch, bodyMat, c.pcb.x, base + (dir * st.h) / 2, c.pcb.y);
+        box(cw, st.h, ch, bodyMat, c.pcb.x, base + (dir * st.h) / 2, c.pcb.y).rotation.y = (-c.pcb.rot * Math.PI) / 180;
       }
       if (st.pins) {
         for (const p of padsOf(c)) box(0.64, st.pins, 0.64, gold, p.world.x, base + dir * (st.h + st.pins / 2 - 0.5), p.world.y);

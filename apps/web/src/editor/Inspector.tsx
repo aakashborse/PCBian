@@ -5,6 +5,7 @@ import {
   getPart,
   netByTerminal,
   nextRotation,
+  normAngle,
   setBoard,
   termKey,
   tracesMap,
@@ -180,8 +181,9 @@ export function Inspector() {
               <NumField label="Y (mm)" value={c.pcb.y} onChange={(y) => updateComponent(doc, c.id, { pcb: { ...c.pcb, y } })} min={-1000} />
               <div className="field">
                 <label>Rotation</label>
-                <button onClick={() => updateComponent(doc, c.id, { pcb: { ...c.pcb, rot: nextRotation(c.pcb.rot) } })}>{c.pcb.rot}° ↻</button>
+                <button onClick={() => updateComponent(doc, c.id, { pcb: { ...c.pcb, rot: normAngle(c.pcb.rot + 90) } })}>{c.pcb.rot}° ↻</button>
               </div>
+              <NumField label="Angle (°)" value={c.pcb.rot} onChange={(rot) => updateComponent(doc, c.id, { pcb: { ...c.pcb, rot: normAngle(rot) } })} min={-360} />
               <div className="field">
                 <label>Side</label>
                 <select value={c.pcb.side} onChange={(e) => updateComponent(doc, c.id, { pcb: { ...c.pcb, side: e.target.value as "top" | "bottom" } })}>

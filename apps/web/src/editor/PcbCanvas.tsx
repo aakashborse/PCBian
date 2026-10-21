@@ -30,7 +30,7 @@ import {
   deleteTrace,
   deleteVia,
   getPart,
-  nextRotation,
+  normAngle,
   padRect,
   padsOf,
   pointSegmentDistance,
@@ -242,7 +242,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         select(null);
       } else if (k === "r" && selection?.kind === "component") {
         const c = byId.get(selection.id);
-        if (c) updateComponent(doc, c.id, { pcb: { ...c.pcb, rot: nextRotation(c.pcb.rot) } });
+        if (c) updateComponent(doc, c.id, { pcb: { ...c.pcb, rot: normAngle(c.pcb.rot + (e.shiftKey ? 45 : 90)) } });
       } else if (k === "f" && selection?.kind === "component") {
         const c = byId.get(selection.id);
         if (c) updateComponent(doc, c.id, { pcb: { ...c.pcb, side: c.pcb.side === "top" ? "bottom" : "top" } });
@@ -797,7 +797,7 @@ function PadEl({ pad, color }: { pad: WorldPad; color: string }) {
       {pad.shape === "circle" ? (
         <circle cx={c.x} cy={c.y} r={Math.min(ww, wh) / 2} fill={color} />
       ) : (
-        <rect x={c.x - ww / 2} y={c.y - wh / 2} width={ww} height={wh} rx={pad.shape === "oval" ? Math.min(ww, wh) / 2 : Math.min(ww, wh) * 0.12} fill={color} />
+        <rect x={c.x - ww / 2} y={c.y - wh / 2} width={ww} height={wh} rx={pad.shape === "oval" ? Math.min(ww, wh) / 2 : Math.min(ww, wh) * 0.12} fill={color} transform={pad.angle ? `rotate(${pad.angle} ${c.x} ${c.y})` : undefined} />
       )}
       {pad.drill && <circle cx={c.x} cy={c.y} r={pad.drill / 2} fill="#0b0d10" />}
     </g>

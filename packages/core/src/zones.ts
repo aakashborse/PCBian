@@ -2,7 +2,7 @@
 // and island removal. The fill outline stays vector-exact (polygon minus cut-outs); a raster
 // pass only decides which islands survive and which same-net copper each island touches.
 import { boardOutline, netRules } from "./doc";
-import { padRect, pointInPolygon, pointSegmentDistance, type Rect, type WorldPad } from "./geometry";
+import { ovalAxis, padCorners, padRect, pointInPolygon, pointSegmentDistance, rotate, type Rect, type WorldPad } from "./geometry";
 import type { CopperLayer, Design, Trace, Vec, Via, Zone } from "./types";
 
 export type Cutout =
@@ -72,22 +72,24 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
     if (net === zone.net) {
       same.push(it);
       if (it.kind === "pad" && thermal) {
-        const r = padRect(it.pad);
-        if (it.pad.shape === "circle") cutouts.push({ kind: "circle", c: it.pad.world, r: Math.min(it.pad.ww, it.pad.wh) / 2 + gapT });
-        else cutouts.push({ kind: "rect", rect: { x0: r.x0 - gapT, y0: r.y0 - gapT, x1: r.x1 + gapT, y1: r.y1 + gapT } });
+        cutouts.push(padCutout(it.pad, gapT));
         const c = it.pad.world;
         const hx = it.pad.ww / 2 + gapT + spokeW;
         const hy = it.pad.wh / 2 + gapT + spokeW;
-        spokes.push({ points: [{ x: c.x - hx, y: c.y }, { x: c.x + hx, y: c.y }], width: spokeW });
-        spokes.push({ points: [{ x: c.x, y: c.y - hy }, { x: c.x, y: c.y + hy }], width: spokeW });
+        // Spokes follow the pad's own axes.
+        const at = (dx: number, dy: number) => {
+          const q = rotate({ x: dx, y: dy }, it.pad.angle);
+          return { x: c.x + q.x, y: c.y + q.y };
+        };
+        spokes.push({ points: [at(-hx, 0), at(hx, 0)], width: spokeW });
+        spokes.push({ points: [at(0, -hy), at(0, hy)], width: spokeW });
       }
       continue;
     }
     const cl = Math.max(zr.clearance, netRules(design, net).clearance);
     let c: Cutout;
     if (it.kind === "pad") {
-      const r = padRect(it.pad);
-      c = it.pad.shape === "circle" ? { kind: "circle", c: it.pad.world, r: Math.min(it.pad.ww, it.pad.wh) / 2 + cl } : { kind: "rect", rect: { x0: r.x0 - cl, y0: r.y0 - cl, x1: r.x1 + cl, y1: r.y1 + cl } };
+      c = padCutout(it.pad, cl);
     } else if (it.kind === "via") c = { kind: "circle", c: it.via, r: it.via.diameter / 2 + cl };
     else c = { kind: "line", points: it.trace.points, width: it.trace.width + 2 * cl };
     cutouts.push(c);
@@ -157,7 +159,7 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
   same.forEach((it, idx) => {
     const c: Cutout =
       it.kind === "pad"
-        ? { kind: "rect", rect: padRect(it.pad) }
+        ? padCutout(it.pad, 0)
         : it.kind === "via"
           ? { kind: "circle", c: it.via, r: it.via.diameter / 2 }
           : { kind: "line", points: it.trace.points, width: it.trace.width };
@@ -206,9 +208,7 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
     // A ring of solid copper (one hatch width beyond the thermal gap) around every same-net pad and via.
     for (const it of same) {
       if (it.kind === "pad") {
-        const r = padRect(it.pad);
-        const m = (thermal ? gapT : 0) + width;
-        halos.push({ kind: "rect", rect: { x0: r.x0 - m, y0: r.y0 - m, x1: r.x1 + m, y1: r.y1 + m } });
+        halos.push(padCutout(it.pad, (thermal ? gapT : 0) + width));
       } else if (it.kind === "via") halos.push({ kind: "circle", c: it.via, r: it.via.diameter / 2 + width });
     }
   }
@@ -341,4 +341,13 @@ export function hatchHoles(fill: ZoneFill): Rect[] {
     }
   }
   return out;
+}
+
+/** A pad's copper grown by `grow` as a cutout (exact for circles and angled pads). */
+export function padCutout(pad: WorldPad, grow: number): Cutout {
+  if (pad.shape === "circle") return { kind: "circle", c: pad.world, r: Math.min(pad.ww, pad.wh) / 2 + grow };
+  if (pad.angle && pad.shape === "oval") return { kind: "line", points: ovalAxis(pad), width: Math.min(pad.ww, pad.wh) + 2 * grow };
+  if (pad.angle) return { kind: "polygon", points: padCorners(pad, grow) };
+  const r = padRect(pad);
+  return { kind: "rect", rect: { x0: r.x0 - grow, y0: r.y0 - grow, x1: r.x1 + grow, y1: r.y1 + grow } };
 }

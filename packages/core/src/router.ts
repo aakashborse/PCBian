@@ -1,6 +1,6 @@
 // Auto-placement and a multi-layer, net-class-aware grid A* auto-router.
 import { analyzeCopper, copperGap, ratsnest, sharedLayers, type CopperItem } from "./copper";
-import { courtyardRect, dist, padRect, pointInPolygon, pointSegmentDistance, polygonSpans, segmentRectDistance, type Rect, type WorldPad } from "./geometry";
+import { courtyardRect, dist, padDistance, padRect, pointInPolygon, pointSegmentDistance, polygonSpans, type Rect, type WorldPad } from "./geometry";
 import { getPart } from "./library";
 import { boardOutline, netRules } from "./doc";
 import { copperLayers } from "./stackup";
@@ -359,7 +359,8 @@ function routeCore(design: Design, opts: RouteOptions = {}): RouteResult {
     if (it.kind === "pad") {
       const r = padRect(it.pad);
       padAt.set(`${it.pad.world.x.toFixed(4)},${it.pad.world.y.toFixed(4)}`, it.pad);
-      for (const l of it.pad.layers) if (layers.includes(l)) stamp(layers.indexOf(l), net, r, (p) => segmentRectDistance(p, p, r), surplus);
+      const pad = it.pad;
+      for (const l of it.pad.layers) if (layers.includes(l)) stamp(layers.indexOf(l), net, r, (p) => padDistance(pad, p), surplus);
     } else if (it.kind === "trace") {
       if (layers.includes(it.trace.layer)) stampTrace(layers.indexOf(it.trace.layer), net, it.trace.points, it.trace.width, surplus);
     } else {

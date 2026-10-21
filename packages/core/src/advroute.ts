@@ -2,7 +2,7 @@
 // groups and differential pairs, and push-and-shove for manually drawn traces.
 import { analyzeCopper, copperGap, netLengths, sharedLayers, traceLength, type CopperAnalysis, type CopperItem } from "./copper";
 import { boardOutline, netRules } from "./doc";
-import { padRect, pointInPolygon, pointSegmentDistance, segmentRectDistance, segmentSegmentDistance } from "./geometry";
+import { padDistance, pointInPolygon, pointSegmentDistance, segmentSegmentDistance } from "./geometry";
 import type { Design, Trace, Vec } from "./types";
 
 const EDGE_CLEAR = 0.3;
@@ -29,7 +29,7 @@ const r4 = (p: Vec) => ({ x: Math.round(p.x * 1e4) / 1e4, y: Math.round(p.y * 1e
 
 /** Distance from a point to an item's copper edge. */
 function pointGap(q: Vec, it: CopperItem): number {
-  if (it.kind === "pad") return segmentRectDistance(q, q, padRect(it.pad));
+  if (it.kind === "pad") return padDistance(it.pad, q);
   if (it.kind === "via") return Math.hypot(q.x - it.via.x, q.y - it.via.y) - it.via.diameter / 2;
   let best = Infinity;
   const p = it.trace.points;

@@ -1,7 +1,7 @@
 // STEP AP214 export of the assembled board: the board as a B-rep solid extruded from its real
 // outline (cutouts and drill holes included) and one box body per fitted component, with colours.
 import { boardOutline } from "./doc";
-import { courtyardRect, padsOf, polygonArea } from "./geometry";
+import { courtyardCorners, padsOf, polygonArea } from "./geometry";
 import { getPart } from "./library";
 import type { ComponentData, Design, Vec } from "./types";
 
@@ -143,15 +143,9 @@ export function stepFile(design: Design): string {
     const part = getPart(c.partId);
     if (!part?.footprint || c.dnp) continue;
     const h = bodyHeight(c);
-    const r = courtyardRect(c);
-    if (!h || !r) continue;
-    const inset = 0.25;
-    const rect = [
-      { x: r.x0 + inset, y: r.y0 + inset },
-      { x: r.x1 - inset, y: r.y0 + inset },
-      { x: r.x1 - inset, y: r.y1 - inset },
-      { x: r.x0 + inset, y: r.y1 - inset },
-    ].map(flip);
+    const corners = courtyardCorners(c, 0.25);
+    if (!h || !corners) continue;
+    const rect = corners.map(flip);
     const [z0, z1] = c.pcb.side === "top" ? [T, T + h] : [-h, 0];
     solids.push({ id: prism(w, c.ref, rect, [], z0, z1), rgb: /HEADER|CONN|USB/i.test(part.footprint.name) ? [0.12, 0.12, 0.14] : [0.16, 0.17, 0.2] });
   }

@@ -1,6 +1,7 @@
 // KiCad interoperability: S-expression parsing, footprint/symbol import and
 // board/netlist export (KiCad 7/8 file formats).
 import { analyzeCopper } from "./copper";
+import { normAngle } from "./geometry";
 import { netRules } from "./doc";
 import { copperLayers, kicadLayerName, OZ_MM, stackupOf, viaKind, viaLayers } from "./stackup";
 import { icSymbol, getPart } from "./library";
@@ -288,7 +289,7 @@ export function kicadPcb(design: Design): string {
     if (!part?.footprint) continue;
     const fp = part.footprint;
     const bottom = c.pcb.side === "bottom";
-    const ang = (360 - c.pcb.rot) % 360;
+    const ang = normAngle(360 - c.pcb.rot);
     const sx = (x: number) => (bottom ? -x : x);
     const cu = bottom ? "B" : "F";
     const smd = fp.pads.every((p) => !p.drill);
@@ -314,7 +315,9 @@ export function kicadPcb(design: Design): string {
       const shape = p.shape === "circle" ? "circle" : p.shape === "oval" ? "oval" : "roundrect";
       const rr = shape === "roundrect" ? " (roundrect_rratio 0.25)" : "";
       const lay = p.drill ? `(layers "*.Cu" "*.Mask")` : `(layers "${cu}.Cu" "${cu}.Paste" "${cu}.Mask")`;
-      out.push(`    (pad ${q(p.id)} ${p.drill ? "thru_hole" : "smd"} ${shape} (at ${f(sx(p.x))} ${f(p.y)}${ang ? ` ${ang}` : ""}) (size ${f(p.w)} ${f(p.h)})${p.drill ? ` (drill ${f(p.drill)})` : ""} ${lay}${rr} ${netRef(net)} (uuid ${q(uuid())}))`);
+      // KiCad pad angles are absolute: the footprint's plus the pad's own (mirrored on the bottom).
+      const pang = normAngle(ang - (bottom ? -(p.rot ?? 0) : p.rot ?? 0));
+      out.push(`    (pad ${q(p.id)} ${p.drill ? "thru_hole" : "smd"} ${shape} (at ${f(sx(p.x))} ${f(p.y)}${pang ? ` ${pang}` : ""}) (size ${f(p.w)} ${f(p.h)})${p.drill ? ` (drill ${f(p.drill)})` : ""} ${lay}${rr} ${netRef(net)} (uuid ${q(uuid())}))`);
     }
     out.push("  )");
   }

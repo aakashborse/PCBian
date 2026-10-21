@@ -6,7 +6,7 @@ import { copperLayers, fromKicadLayerName } from "./stackup";
 import { analyzeCopper } from "./copper";
 import { attachNet } from "./edit";
 import * as fp from "./footprints";
-import { rotate } from "./geometry";
+import { normAngle, rotate } from "./geometry";
 import { symbolFromSExpr, parseSExpr, type SExpr } from "./kicad";
 import { getPart, icSymbol } from "./library";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
@@ -28,7 +28,6 @@ const rotK = (p: Vec, deg: number): Vec => {
   return { x: r4(p.x * Math.cos(a) + p.y * Math.sin(a)), y: r4(-p.x * Math.sin(a) + p.y * Math.cos(a)) };
 };
 const round90 = (deg: number) => ((((Math.round(deg / 90) * 90) % 360) + 360) % 360) as Rotation;
-const invRotate = (p: Vec, rot: Rotation): Vec => rotate(p, ((360 - rot) % 360) as Rotation);
 
 export interface KicadImportInput {
   /** Schematic files; the root sheet is the one not referenced by another sheet. */
@@ -65,14 +64,13 @@ function parsePcbFootprint(f: SExpr[], warnings: string[]): PcbFootprint | null 
   const at = kid(f, "at");
   const pos = { x: num(at, 1), y: num(at, 2) };
   const angle = num(at, 3);
-  const rot = round90(360 - angle);
+  const rot = normAngle(360 - angle);
   const ref = prop(f, "Reference") ?? (kids(f, "fp_text").find((t) => t[1] === "reference")?.[2] as string) ?? "";
   const value = prop(f, "Value") ?? (kids(f, "fp_text").find((t) => t[1] === "value")?.[2] as string) ?? "";
-  if (Math.abs(((angle % 90) + 90) % 90) > 0.01) warnings.push(`${ref}: rotation ${angle}° rounded to ${(360 - rot) % 360}°`);
   const mirror = side === "bottom";
   // World -> PCBian footprint-local coordinates.
   const toLocal = (w: Vec): Vec => {
-    const l = invRotate({ x: w.x - pos.x, y: w.y - pos.y }, rot);
+    const l = rotate({ x: w.x - pos.x, y: w.y - pos.y }, -rot);
     return { x: r4(mirror ? -l.x : l.x), y: r4(l.y) };
   };
   const fromKLocal = (p: Vec) => {
@@ -89,13 +87,17 @@ function parsePcbFootprint(f: SExpr[], warnings: string[]): PcbFootprint | null 
     const padAbs = num(pat, 3);
     let w = num(kid(p, "size"), 1);
     let h = num(kid(p, "size"), 2);
-    // Pad size is in the pad's own orientation; express it in the footprint frame.
-    const rel = (((padAbs - angle) % 180) + 180) % 180;
-    if (Math.abs(rel - 90) < 1) [w, h] = [h, w];
+    // Pad size is in the pad's own orientation. Quarter turns relative to the footprint swap
+    // the size; any other angle is kept as the pad's own rotation (clockwise, mirrored on the bottom).
+    const rel = normAngle(mirror ? padAbs - angle : angle - padAbs);
+    const q = Math.round(rel / 90);
+    const axis = Math.abs(rel - q * 90) < 0.01;
+    if (axis && q % 2 !== 0) [w, h] = [h, w];
+    const padRot = axis ? undefined : rel;
     const drill = kid(p, "drill");
     const drillD = drill ? Number(drill.find((x) => typeof x === "string" && /^[\d.]+$/.test(x)) ?? 0) : 0;
     const local = toLocal(world);
-    pads.push({ id: String(id), x: local.x, y: local.y, w: r4(w), h: r4(h), shape: shape === "circle" ? "circle" : shape === "oval" ? "oval" : "rect", ...(type === "thru_hole" && drillD ? { drill: drillD } : {}) });
+    pads.push({ id: String(id), x: local.x, y: local.y, w: r4(w), h: r4(h), shape: shape === "circle" ? "circle" : shape === "oval" ? "oval" : "rect", ...(padRot !== undefined ? { rot: padRot } : {}), ...(type === "thru_hole" && drillD ? { drill: drillD } : {}) });
     const net = kid(p, "net");
     if (net && net[2]) nets.set(String(id), String(net[2]));
   }

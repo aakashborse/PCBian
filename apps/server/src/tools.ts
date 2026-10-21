@@ -75,6 +75,7 @@ import {
   gerberFiles,
   getDesign,
   getPart,
+  normAngle,
   renameSheet,
   resolveTerminal,
   runDrc,
@@ -497,12 +498,12 @@ export const TOOLS = {
   // ----- layout -----
   place_pcb: tool({
     description: "Move footprints on the PCB (mm from board top-left, y down). Put connectors at board edges, decoupling caps next to IC supply pins.",
-    schema: z.object({ placements: z.array(z.object({ ref: z.string(), x: z.number(), y: z.number(), rotation: rotation.optional(), side: z.enum(["top", "bottom"]).optional() })).min(1) }),
+    schema: z.object({ placements: z.array(z.object({ ref: z.string(), x: z.number(), y: z.number(), rotation: z.number().optional().describe("Degrees clockwise; any angle (e.g. 45 for diagonal parts)"), side: z.enum(["top", "bottom"]).optional() })).min(1) }),
     run: (doc, { placements }) =>
       each(placements, ({ ref, x, y, rotation, side }) => {
         const c = findByRef(doc, ref);
         if (!c) throw new Error(`No component ${ref}`);
-        updateComponent(doc, c.id, { pcb: { x, y, rot: (rotation ?? c.pcb.rot) as Rotation, side: side ?? c.pcb.side } });
+        updateComponent(doc, c.id, { pcb: { x, y, rot: normAngle(rotation ?? c.pcb.rot), side: side ?? c.pcb.side } });
         return `${ref}: ok`;
       }),
     label: ({ placements }) => `Place ${placements.map((p) => p.ref).join(", ")}`,

@@ -63,6 +63,8 @@ export interface Pad {
   shape: PadShape;
   /** Present for through-hole pads (diameter in mm). */
   drill?: number;
+  /** Pad rotation inside the footprint (degrees), for pads that are not axis-aligned. */
+  rot?: number;
 }
 
 export interface Footprint {
@@ -103,7 +105,9 @@ export interface Placement {
   mirror?: boolean;
 }
 
-export interface PcbPlacement extends Placement {
+/** Board placement: any rotation angle in degrees (positive = clockwise on screen, y down). */
+export interface PcbPlacement extends Omit<Placement, "rot" | "mirror"> {
+  rot: number;
   side: Side;
 }
 

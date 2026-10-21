@@ -1,22 +1,32 @@
 import { getPart } from "./library";
-import { ALL_COPPER, type ComponentData, type CopperLayer, type Pad, type PcbPlacement, type Placement, type Rotation, type SymbolPin, type Vec } from "./types";
+import { ALL_COPPER, type ComponentData, type CopperLayer, type Pad, type PcbPlacement, type Rotation, type SymbolPin, type Vec } from "./types";
 
-export function rotate(p: Vec, rot: Rotation): Vec {
-  switch (rot) {
+/** Rotate by any angle in degrees (90 maps +x to +y, i.e. clockwise on a y-down screen). */
+export function rotate(p: Vec, rot: number): Vec {
+  switch (((rot % 360) + 360) % 360) {
+    case 0:
+      return { x: p.x, y: p.y };
     case 90:
       return { x: -p.y, y: p.x };
     case 180:
       return { x: -p.x, y: -p.y };
     case 270:
       return { x: p.y, y: -p.x };
-    default:
-      return { x: p.x, y: p.y };
+    default: {
+      const a = (rot * Math.PI) / 180;
+      const c = Math.cos(a);
+      const s = Math.sin(a);
+      return { x: p.x * c - p.y * s, y: p.x * s + p.y * c };
+    }
   }
 }
 
+/** Angle normalised to [0, 360). */
+export const normAngle = (deg: number) => ((Math.round(deg * 1e6) / 1e6) % 360 + 360) % 360;
+
 export const nextRotation = (r: Rotation): Rotation => (((r + 90) % 360) as Rotation);
 
-export function toWorld(local: Vec, at: Placement, mirrorX = false): Vec {
+export function toWorld(local: Vec, at: { x: number; y: number; rot: number; mirror?: boolean }, mirrorX = false): Vec {
   const m = mirrorX ? { x: -local.x, y: local.y } : local;
   const r = rotate(m, at.rot);
   return { x: at.x + r.x, y: at.y + r.y };
@@ -101,9 +111,11 @@ export interface WorldPad extends Pad {
   comp: string;
   ref: string;
   world: Vec;
-  /** Width/height after rotation (rotations are multiples of 90 degrees). */
+  /** Width/height in the board frame; for angled pads, the unrotated size (see `angle`). */
   ww: number;
   wh: number;
+  /** Remaining rotation (degrees, 0 < angle < 180) for pads that are not axis-aligned; 0 otherwise. */
+  angle: number;
   layers: CopperLayer[];
 }
 
@@ -111,30 +123,104 @@ export function padsOf(c: ComponentData): WorldPad[] {
   const part = getPart(c.partId);
   if (!part?.footprint) return [];
   const mirror = c.pcb.side === "bottom";
-  const swap = c.pcb.rot === 90 || c.pcb.rot === 270;
-  return part.footprint.pads.map((p) => ({
-    ...p,
-    comp: c.id,
-    ref: c.ref,
-    world: toWorld(p, c.pcb, mirror),
-    ww: swap ? p.h : p.w,
-    wh: swap ? p.w : p.h,
-    layers: p.drill ? ALL_COPPER : [c.pcb.side],
-  }));
+  return part.footprint.pads.map((p) => {
+    // Mirroring for the bottom side flips the pad's own rotation.
+    const total = normAngle(c.pcb.rot + (mirror ? -(p.rot ?? 0) : p.rot ?? 0));
+    const quarter = Math.round(total / 90);
+    const axis = Math.abs(total - quarter * 90) < 1e-6;
+    const swap = axis && quarter % 2 !== 0;
+    return {
+      ...p,
+      comp: c.id,
+      ref: c.ref,
+      world: toWorld(p, c.pcb, mirror),
+      ww: swap ? p.h : p.w,
+      wh: swap ? p.w : p.h,
+      angle: axis || p.shape === "circle" ? 0 : total % 180,
+      layers: p.drill ? ALL_COPPER : [c.pcb.side],
+    };
+  });
 }
 
+/** Corners of a pad's rectangle in the board frame (exact for angled pads). */
+export function padCorners(p: Pick<WorldPad, "world" | "ww" | "wh" | "angle">, grow = 0): Vec[] {
+  const hw = p.ww / 2 + grow;
+  const hh = p.wh / 2 + grow;
+  return [
+    { x: -hw, y: -hh },
+    { x: hw, y: -hh },
+    { x: hw, y: hh },
+    { x: -hw, y: hh },
+  ].map((q) => {
+    const r = rotate(q, p.angle);
+    return { x: p.world.x + r.x, y: p.world.y + r.y };
+  });
+}
+
+/** Distance from a segment to a polygon's area (0 when they touch or the segment lies inside). */
+export function segmentPolygonDistance(a: Vec, b: Vec, poly: Vec[]): number {
+  if (pointInPolygon(a, poly) || pointInPolygon(b, poly)) return 0;
+  let best = Infinity;
+  for (let i = 0; i < poly.length; i++) best = Math.min(best, segmentSegmentDistance(a, b, poly[i], poly[(i + 1) % poly.length]));
+  return best;
+}
+
+/** Distance between two polygons' areas (0 when they overlap). */
+export function polygonPolygonDistance(p: Vec[], q: Vec[]): number {
+  if (pointInPolygon(p[0], q) || pointInPolygon(q[0], p)) return 0;
+  let best = Infinity;
+  for (let i = 0; i < p.length; i++) best = Math.min(best, segmentPolygonDistance(p[i], p[(i + 1) % p.length], q));
+  return best;
+}
+
+/** Centre-line of an oval pad (its stadium is this segment grown by half the short side). */
+export function ovalAxis(p: Pick<WorldPad, "world" | "ww" | "wh" | "angle">): [Vec, Vec] {
+  const r = Math.min(p.ww, p.wh) / 2;
+  const d = rotate({ x: p.ww / 2 - r, y: p.wh / 2 - r }, p.angle);
+  return [
+    { x: p.world.x - d.x, y: p.world.y - d.y },
+    { x: p.world.x + d.x, y: p.world.y + d.y },
+  ];
+}
+
+/** Distance from a point to a pad's copper (0 inside); exact for circles, ovals and angled pads. */
+export function padDistance(p: WorldPad, q: Vec): number {
+  if (p.shape === "circle") return Math.max(0, Math.hypot(q.x - p.world.x, q.y - p.world.y) - Math.min(p.ww, p.wh) / 2);
+  if (p.shape === "oval") {
+    const [a, b] = ovalAxis(p);
+    return Math.max(0, pointSegmentDistance(q, a, b) - Math.min(p.ww, p.wh) / 2);
+  }
+  if (p.angle) return segmentPolygonDistance(q, q, padCorners(p));
+  return segmentRectDistance(q, q, padRect(p));
+}
+
+/** Axis-aligned bounds of a pad (its exact rectangle when the pad is not angled). */
 export function padRect(p: WorldPad): Rect {
-  return { x0: p.world.x - p.ww / 2, y0: p.world.y - p.wh / 2, x1: p.world.x + p.ww / 2, y1: p.world.y + p.wh / 2 };
+  if (!p.angle) return { x0: p.world.x - p.ww / 2, y0: p.world.y - p.wh / 2, x1: p.world.x + p.ww / 2, y1: p.world.y + p.wh / 2 };
+  const cs = padCorners(p);
+  return { x0: Math.min(...cs.map((q) => q.x)), y0: Math.min(...cs.map((q) => q.y)), x1: Math.max(...cs.map((q) => q.x)), y1: Math.max(...cs.map((q) => q.y)) };
 }
 
 export function courtyardRect(c: ComponentData): Rect | null {
   const part = getPart(c.partId);
   if (!part?.footprint) return null;
   const { w, h } = part.footprint.courtyard;
-  const swap = c.pcb.rot === 90 || c.pcb.rot === 270;
-  const hw = (swap ? h : w) / 2;
-  const hh = (swap ? w : h) / 2;
+  // Bounding box of the rotated courtyard (exact for multiples of 90 degrees).
+  const a = (normAngle(c.pcb.rot) * Math.PI) / 180;
+  const cs = Math.abs(Math.cos(a));
+  const sn = Math.abs(Math.sin(a));
+  const hw = (w * cs + h * sn) / 2;
+  const hh = (w * sn + h * cs) / 2;
   return { x0: c.pcb.x - hw, y0: c.pcb.y - hh, x1: c.pcb.x + hw, y1: c.pcb.y + hh };
+}
+
+/** Corners of a part's courtyard (shrunk by `inset`) in the board frame, at any rotation. */
+export function courtyardCorners(c: ComponentData, inset = 0): Vec[] | null {
+  const part = getPart(c.partId);
+  if (!part?.footprint) return null;
+  const hw = part.footprint.courtyard.w / 2 - inset;
+  const hh = part.footprint.courtyard.h / 2 - inset;
+  return padCorners({ world: c.pcb, ww: 2 * hw, wh: 2 * hh, angle: normAngle(c.pcb.rot) });
 }
 
 export function defaultPcbPlacement(index: number): PcbPlacement {

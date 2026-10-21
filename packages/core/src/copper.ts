@@ -4,11 +4,15 @@ import { copperLayers, diffImpedance, traceImpedance, viaKind, viaLayers } from 
 import {
   courtyardRect,
   dist,
+  ovalAxis,
+  padCorners,
   padRect,
+  polygonPolygonDistance,
   padsOf,
   pointInPolygon,
   polylineTouchesPolygon,
   rectsOverlap,
+  segmentPolygonDistance,
   segmentRectDistance,
   segmentSegmentDistance,
   toWorld,
@@ -38,7 +42,7 @@ export function copperGap(a: CopperItem, b: CopperItem): number {
   return gap(a, b);
 }
 /** Copper of an item as capsules (segment + radius) and rectangles. */
-type Prim = { kind: "cap"; a: Vec; b: Vec; r: number } | { kind: "rect"; r: Rect };
+type Prim = { kind: "cap"; a: Vec; b: Vec; r: number } | { kind: "rect"; r: Rect } | { kind: "poly"; pts: Vec[] };
 function prims(it: CopperItem): Prim[] {
   if (it.kind === "via") return [{ kind: "cap", a: it.via, b: it.via, r: it.via.diameter / 2 }];
   if (it.kind === "trace") return segs(it.trace).map(([a, b]) => ({ kind: "cap", a, b, r: it.trace.width / 2 }));
@@ -46,14 +50,30 @@ function prims(it: CopperItem): Prim[] {
   // Round pads are circles and oval pads are stadiums, not their bounding boxes.
   if (p.shape === "circle") return [{ kind: "cap", a: p.world, b: p.world, r: Math.min(p.ww, p.wh) / 2 }];
   if (p.shape === "oval") {
-    const r = Math.min(p.ww, p.wh) / 2;
-    const dx = p.ww / 2 - r;
-    const dy = p.wh / 2 - r;
-    return [{ kind: "cap", a: { x: p.world.x - dx, y: p.world.y - dy }, b: { x: p.world.x + dx, y: p.world.y + dy }, r }];
+    const [a, b] = ovalAxis(p);
+    return [{ kind: "cap", a, b, r: Math.min(p.ww, p.wh) / 2 }];
   }
+  // Angled rectangular pads are exact rotated polygons.
+  if (p.angle) return [{ kind: "poly", pts: padCorners(p) }];
   return [{ kind: "rect", r: padRect(p) }];
 }
+const rectPts = (r: Rect): Vec[] => [
+  { x: r.x0, y: r.y0 },
+  { x: r.x1, y: r.y0 },
+  { x: r.x1, y: r.y1 },
+  { x: r.x0, y: r.y1 },
+];
 function primGap(a: Prim, b: Prim): number {
+  if (a.kind === "poly" || b.kind === "poly") {
+    if (b.kind === "cap") return primGap(b, a);
+    const pa = a.kind === "poly" ? a.pts : a.kind === "rect" ? rectPts(a.r) : null;
+    const pb = b.kind === "poly" ? b.pts : rectPts(b.r);
+    if (!pa) {
+      const c = a as { a: Vec; b: Vec; r: number };
+      return segmentPolygonDistance(c.a, c.b, pb) - c.r;
+    }
+    return polygonPolygonDistance(pa, pb);
+  }
   if (a.kind === "cap" && b.kind === "cap") return segmentSegmentDistance(a.a, a.b, b.a, b.b) - a.r - b.r;
   if (a.kind === "cap" && b.kind === "rect") return segmentRectDistance(a.a, a.b, b.r) - a.r;
   if (a.kind === "rect" && b.kind === "cap") return primGap(b, a);
@@ -335,8 +355,8 @@ export function runDrc(design: Design): Issue[] {
   }
   for (const it of analysis.items) {
     if (it.kind !== "pad") continue;
-    const r = padRect(it.pad);
-    const d = Math.min(edgeDistance({ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }), edgeDistance({ x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }), edgeDistance({ x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }), edgeDistance({ x: r.x0, y: r.y1 }, { x: r.x0, y: r.y0 }));
+    const cs = padCorners(it.pad);
+    const d = Math.min(...cs.map((q, i) => edgeDistance(q, cs[(i + 1) % cs.length])));
     if (insideBoard(it.pad.world) && d < EDGE_CLEAR - 1e-9) issues.push({ severity: "warning", code: "edge_clearance", message: `${it.pad.ref} pad ${it.pad.id} is ${d.toFixed(2)}mm from the board edge`, at: it.pad.world, refs: [it.pad.ref] });
   }
   issues.push(...silkAndMaskChecks(design, analysis));

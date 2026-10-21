@@ -4,7 +4,7 @@
 import { analyzeCopper, boardTeardrops, zoneFill } from "./copper";
 import { silkPolylines } from "./export";
 import { strokeText } from "./font";
-import { courtyardRect, padsOf } from "./geometry";
+import { courtyardRect, ovalAxis, padCorners, padsOf, type WorldPad } from "./geometry";
 import { getPart } from "./library";
 import { netByTerminal, termKey } from "./netlist";
 import { copperLayers, viaKind, viaLayers } from "./stackup";
@@ -42,6 +42,14 @@ function cutoutFeature(c: Cutout, dark: boolean, net?: string): Feature {
   return { kind: "line", points: c.points, width: c.width, dark, net };
 }
 
+/** A pad feature of the given size; angled pads become exact surfaces (rects) or round lines (ovals). */
+function padFeature(p: WorldPad, w: number, h: number, dark: boolean, extra: { net?: string; ref?: string; pin?: string } = {}, shape: WorldPad["shape"] = p.shape): Feature {
+  const q = { world: p.world, ww: w, wh: h, angle: p.angle };
+  if (!p.angle || shape === "circle") return { kind: "pad", shape, at: p.world, w, h, dark, ...extra };
+  if (shape === "oval") return { kind: "line", points: ovalAxis(q), width: Math.min(w, h), dark, net: extra.net };
+  return { kind: "surface", points: padCorners(q), dark, net: extra.net };
+}
+
 export function fabData(design: Design): FabData {
   const analysis = analyzeCopper(design);
   const netOf = netByTerminal(analysis.nets);
@@ -70,7 +78,7 @@ export function fabData(design: Design): FabData {
     }
     for (const td of drops.filter((t) => t.layer === layer)) f.push({ kind: "surface", points: td.points, dark: true });
     for (const c of parts)
-      for (const p of padsOf(c)) if (p.layers.includes(layer)) f.push({ kind: "pad", shape: p.shape, at: p.world, w: p.ww, h: p.wh, dark: true, net: netOf.get(termKey({ comp: c.id, pin: p.id })), ref: c.ref, pin: p.id });
+      for (const p of padsOf(c)) if (p.layers.includes(layer)) f.push(padFeature(p, p.ww, p.wh, true, { net: netOf.get(termKey({ comp: c.id, pin: p.id })), ref: c.ref, pin: p.id }));
     for (const t of design.traces) if (t.layer === layer) f.push({ kind: "line", points: t.points, width: t.width, dark: true, net: traceNet.get(t.id) });
     for (const v of design.vias) if (viaLayers(design.board, v).includes(layer)) f.push({ kind: "pad", shape: "circle", at: v, w: v.diameter, h: v.diameter, dark: true, net: viaNet.get(v.id) });
     return { layer, features: f };
@@ -83,8 +91,8 @@ export function fabData(design: Design): FabData {
     for (const c of parts) {
       for (const p of padsOf(c)) {
         if (!p.layers.includes(s)) continue;
-        mask.push({ kind: "pad", shape: p.shape, at: p.world, w: p.ww + 0.1, h: p.wh + 0.1, dark: true });
-        if (!p.drill && !c.dnp) paste.push({ kind: "pad", shape: p.shape, at: p.world, w: p.ww * 0.9, h: p.wh * 0.9, dark: true });
+        mask.push(padFeature(p, p.ww + 0.1, p.wh + 0.1, true));
+        if (!p.drill && !c.dnp) paste.push(padFeature(p, p.ww * 0.9, p.wh * 0.9, true));
       }
       if (c.pcb.side === s) {
         for (const sh of getPart(c.partId)!.footprint!.silk) for (const pl of silkPolylines(sh, c)) silk.push({ kind: "line", points: pl, width: 0.15, dark: true });
@@ -93,7 +101,7 @@ export function fabData(design: Design): FabData {
       }
     }
     // Silkscreen never prints on exposed copper.
-    for (const c of parts) for (const p of padsOf(c)) if (p.layers.includes(s)) silk.push({ kind: "pad", shape: p.shape === "circle" ? "circle" : "rect", at: p.world, w: p.ww + 0.2, h: p.wh + 0.2, dark: false });
+    for (const c of parts) for (const p of padsOf(c)) if (p.layers.includes(s)) silk.push(padFeature(p, p.ww + 0.2, p.wh + 0.2, false, {}, p.shape === "circle" ? "circle" : "rect"));
     return { mask, paste, silk };
   };
   const top = side("top");

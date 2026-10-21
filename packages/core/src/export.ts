@@ -1,5 +1,5 @@
 // Manufacturing outputs: BOM, netlist, Gerber RS-274X and Excellon drill files.
-import { courtyardRect, padsOf, toWorld } from "./geometry";
+import { courtyardRect, ovalAxis, padCorners, padsOf, toWorld, type WorldPad } from "./geometry";
 import { getPart } from "./library";
 import { computeNets } from "./netlist";
 import { analyzeCopper, boardTeardrops, zoneFill, type Cutout } from "./copper";
@@ -70,6 +70,15 @@ class Gerber {
   flash(shape: "C" | "R" | "O", w: number, h: number, at: Vec) {
     this.select(shape === "C" ? `C,${w.toFixed(4)}` : `${shape},${w.toFixed(4)}X${h.toFixed(4)}`);
     this.body.push(`${this.xy(at)}D03*`);
+  }
+
+  /** A pad of the given size; angled pads become exact regions (rects) or stroked lines (ovals). */
+  pad(p: Pick<WorldPad, "world" | "angle" | "shape">, w: number, h: number) {
+    const shape = p.shape === "circle" ? "C" : p.shape === "oval" ? "O" : "R";
+    const q = { world: p.world, ww: w, wh: h, angle: p.angle };
+    if (!p.angle || shape === "C") this.flash(shape, w, h, p.world);
+    else if (shape === "O") this.polyline(Math.min(w, h), ovalAxis(q));
+    else this.region(padCorners(q));
   }
 
   /** Switch between dark (adds copper) and clear (removes copper) polarity. */
@@ -166,7 +175,7 @@ export function gerberFiles(design: Design): Record<string, string> {
     for (const c of allParts) {
       for (const p of padsOf(c)) {
         if (!p.layers.includes(layer)) continue;
-        cu.flash(p.shape === "circle" ? "C" : p.shape === "oval" ? "O" : "R", p.ww, p.wh, p.world);
+        cu.pad(p, p.ww, p.wh);
       }
     }
     for (const t of design.traces) if (t.layer === layer) cu.polyline(t.width, t.points);
@@ -182,9 +191,8 @@ export function gerberFiles(design: Design): Record<string, string> {
     for (const c of allParts) {
       for (const p of padsOf(c)) {
         if (!p.layers.includes(side)) continue;
-        const shape = p.shape === "circle" ? "C" : p.shape === "oval" ? "O" : "R";
-        mask.flash(shape, p.ww + 0.1, p.wh + 0.1, p.world);
-        if (!p.drill && parts.includes(c)) paste.flash(shape, p.ww * 0.9, p.wh * 0.9, p.world);
+        mask.pad(p, p.ww + 0.1, p.wh + 0.1);
+        if (!p.drill && parts.includes(c)) paste.pad(p, p.ww * 0.9, p.wh * 0.9);
       }
       if (c.pcb.side === side) {
         for (const s of getPart(c.partId)!.footprint!.silk) for (const pl of silkPolylines(s, c)) silk.polyline(0.15, pl);
@@ -194,7 +202,7 @@ export function gerberFiles(design: Design): Record<string, string> {
     }
     // Clip silkscreen away from exposed copper.
     silk.polarity(false);
-    for (const c of allParts) for (const p of padsOf(c)) if (p.layers.includes(side)) silk.flash(p.shape === "circle" ? "C" : "R", p.ww + 0.2, p.wh + 0.2, p.world);
+    for (const c of allParts) for (const p of padsOf(c)) if (p.layers.includes(side)) silk.pad({ ...p, shape: p.shape === "circle" ? "circle" : "rect" }, p.ww + 0.2, p.wh + 0.2);
     silk.polarity(true);
     files[`${design.name}-${tag}_Mask.${side === "top" ? "gts" : "gbs"}`] = mask.toString();
     files[`${design.name}-${tag}_Silkscreen.${side === "top" ? "gto" : "gbo"}`] = silk.toString();

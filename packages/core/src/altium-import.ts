@@ -5,8 +5,8 @@
 import * as CFB from "cfb";
 import type * as Y from "yjs";
 import { importBoard, type KicadImportReport, type PcbData, type PcbFootprint } from "./kicad-import";
-import { rotate } from "./geometry";
-import type { CopperLayer, Pad, Rotation, Vec } from "./types";
+import { normAngle, rotate } from "./geometry";
+import type { CopperLayer, Pad, Vec } from "./types";
 
 const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
 /** Altium internal unit = 1/10000 mil. */
@@ -391,35 +391,26 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
   for (const v of rawVias) vias.push({ ...v.at, diameter: v.dia, drill: v.hole, from: toLayer(v.a) ?? undefined, to: toLayer(v.b) ?? undefined });
 
   // Footprints: pads are stored in board coordinates; recover the local frame from each component.
-  let angled = 0;
   const footprints: PcbFootprint[] = comps.map((c, i) => {
-    const rot = (((Math.round(c.rot / 90) * 90) % 360) + 360) % 360;
-    if (Math.abs(c.rot - Math.round(c.rot / 90) * 90) > 0.01) warnings.push(`${c.ref}: rotation ${c.rot}° rounded to ${rot}°`);
-    const pcbRot = ((360 - rot) % 360) as Rotation;
+    const pcbRot = normAngle(360 - c.rot);
     const toLocal = (w: Vec): Vec => {
-      const l = rotate({ x: w.x - c.at.x, y: w.y - c.at.y }, ((360 - pcbRot) % 360) as Rotation);
+      const l = rotate({ x: w.x - c.at.x, y: w.y - c.at.y }, -pcbRot);
       return { x: r4(c.side === "bottom" ? -l.x : l.x), y: r4(l.y) };
     };
     const own = pads.filter((p) => p.comp === i && p.name);
     const fpPads: Pad[] = [];
     const netMap = new Map<string, string>();
     for (const p of own) {
-      const swapW = Math.round(p.dir / 90) % 2 !== 0;
-      const [ww, wh] = swapW ? [p.size.y, p.size.x] : [p.size.x, p.size.y];
-      const [w, h] = pcbRot % 180 !== 0 ? [wh, ww] : [ww, wh];
+      // Pad angle relative to the footprint (mirrored on the bottom): quarter turns swap the size,
+      // anything else is kept as the pad's own rotation.
+      const rel = normAngle(c.side === "bottom" ? p.dir - c.rot : c.rot - p.dir);
+      const q = Math.round(rel / 90);
+      const axis = Math.abs(rel - q * 90) < 0.01;
+      const [w, h] = axis && q % 2 !== 0 ? [p.size.y, p.size.x] : [p.size.x, p.size.y];
       const l = toLocal(p.at);
-      let shape: Pad["shape"] = p.shape === 1 ? (Math.abs(w - h) < 1e-6 ? "circle" : "oval") : "rect";
-      let [fw, fh] = [w, h];
-      // Pads only turn in 90° steps here; an angled pad becomes its inscribed circle so it never
-      // claims copper the real pad does not cover.
-      const off = ((p.dir % 90) + 90) % 90;
-      if (off > 0.5 && off < 89.5) {
-        shape = "circle";
-        fw = fh = Math.min(w, h);
-        angled++;
-      }
+      const shape: Pad["shape"] = p.shape === 1 ? (Math.abs(w - h) < 1e-6 ? "circle" : "oval") : "rect";
       if (fpPads.some((q) => q.id === p.name)) continue;
-      fpPads.push({ id: p.name, x: l.x, y: l.y, w: r4(fw), h: r4(fh), shape, ...(p.hole > 0 ? { drill: r4(p.hole) } : {}) });
+      fpPads.push({ id: p.name, x: l.x, y: l.y, w: r4(w), h: r4(h), shape, ...(axis ? {} : { rot: r4(rel) }), ...(p.hole > 0 ? { drill: r4(p.hole) } : {}) });
       const net = nets[p.net];
       if (p.net !== NONE && net) netMap.set(p.name, net);
     }
@@ -434,7 +425,6 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       nets: netMap,
     };
   });
-  if (angled) warnings.push(`${angled} pad(s) at non-90° angles were approximated by their inscribed circle`);
   const free = pads.filter((p) => p.comp === NONE).length;
   if (free) warnings.push(`${free} free pad(s) outside components were skipped`);
 
