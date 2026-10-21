@@ -1,5 +1,6 @@
-import type { DesignDiff } from "@pcbian/core";
+import { restoreInto, type DesignDiff } from "@pcbian/core";
 import { useCallback, useEffect, useState } from "react";
+import * as Y from "yjs";
 import { api, type VersionMeta } from "../lib/api";
 import { navigate } from "../lib/router";
 import { useUser } from "../lib/user";
@@ -8,7 +9,33 @@ import { useEditor } from "./context";
 const when = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
 export function HistoryPanel() {
-  const { projectId, toast } = useEditor();
+  const { projectId, toast, conn } = useEditor();
+  // The last restore, undoable while it is still the newest step of this user's undo history.
+  const [restored, setRestored] = useState<{ name: string; depth: number } | null>(null);
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const on = () => bump((n) => n + 1);
+    conn.undo.on("stack-item-added", on);
+    conn.undo.on("stack-item-popped", on);
+    return () => {
+      conn.undo.off("stack-item-added", on);
+      conn.undo.off("stack-item-popped", on);
+    };
+  }, [conn]);
+  const canUndoRestore = restored !== null && conn.undo.undoStack.length === restored.depth;
+  const restore = async (vid: string, vname: string) => {
+    // Restore in this client as one undo step (Ctrl+Z reverts it), after saving the current state.
+    const update = await api.versionUpdate(projectId, vid);
+    await api.saveVersion(projectId, `Before restoring "${vname}"`, user.name);
+    const snap = new Y.Doc();
+    Y.applyUpdate(snap, update);
+    conn.undo.stopCapturing();
+    restoreInto(conn.doc, snap, null);
+    conn.undo.stopCapturing();
+    setRestored({ name: vname, depth: conn.undo.undoStack.length });
+    toast(`Restored "${vname}" (Ctrl+Z to undo)`);
+    refresh();
+  };
   const user = useUser();
   const [list, setList] = useState<VersionMeta[] | null>(null);
   const [name, setName] = useState("");
@@ -43,6 +70,22 @@ export function HistoryPanel() {
           Save
         </button>
       </div>
+      {canUndoRestore && (
+        <div className="card row" style={{ gap: 6, marginBottom: 8 }}>
+          <span className="small">Restored “{restored!.name}”.</span>
+          <span className="spacer" />
+          <button
+            className="small"
+            onClick={() => {
+              conn.undo.undo();
+              setRestored(null);
+              toast("Restore undone");
+            }}
+          >
+            Undo restore
+          </button>
+        </div>
+      )}
       <label className="small row muted" style={{ gap: 4, marginBottom: 8 }}>
         <input type="checkbox" checked={showAuto} onChange={(e) => setShowAuto(e.target.checked)} />
         Show autosaves and copilot snapshots
@@ -68,10 +111,8 @@ export function HistoryPanel() {
               <button
                 className="small"
                 onClick={async () => {
-                  if (!confirm(`Restore "${v.name}"? The current design is saved as a version first, so this can be undone.`)) return;
-                  await api.restoreVersion(projectId, v.id, user.name);
-                  toast(`Restored "${v.name}"`);
-                  refresh();
+                  if (!confirm(`Restore "${v.name}"? You can undo it with Ctrl+Z, and the current design is also saved as a version first.`)) return;
+                  await restore(v.id, v.name).catch((e) => toast((e as Error).message));
                 }}
               >
                 Restore

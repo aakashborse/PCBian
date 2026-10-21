@@ -20,6 +20,7 @@ import {
   type WorldPad,
 } from "./geometry";
 import { getPart } from "./library";
+import { area, intersection, islandShape } from "./poly";
 import { compileRules, ruleConstraint, type RuleItem, type RuleSet } from "./rules";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
 import { computeZoneFill, teardrops, type Cutout, type ZoneFill } from "./zones";
@@ -88,6 +89,16 @@ function gap(a: CopperItem, b: CopperItem): number {
   return best;
 }
 
+/** Bounding box of an item's copper. */
+function itemBox(it: CopperItem): Rect {
+  if (it.kind === "pad") return padRect(it.pad);
+  if (it.kind === "via") return { x0: it.via.x - it.via.diameter / 2, y0: it.via.y - it.via.diameter / 2, x1: it.via.x + it.via.diameter / 2, y1: it.via.y + it.via.diameter / 2 };
+  const xs = it.trace.points.map((p) => p.x);
+  const ys = it.trace.points.map((p) => p.y);
+  const h = it.trace.width / 2;
+  return { x0: Math.min(...xs) - h, y0: Math.min(...ys) - h, x1: Math.max(...xs) + h, y1: Math.max(...ys) + h };
+}
+
 export const sharedLayers = (a: CopperItem, b: CopperItem): CopperLayer[] => ALL_COPPER.filter((l) => itemOnLayer(a, l) && itemOnLayer(b, l));
 
 export interface CopperAnalysis {
@@ -120,19 +131,51 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
   const uf = new UnionFind();
   items.forEach((it) => uf.find(it.key));
   const pairs: CopperAnalysis["pairs"] = [];
-  for (let i = 0; i < items.length; i++) {
-    for (let j = i + 1; j < items.length; j++) {
-      const a = items[i];
-      const b = items[j];
-      if (sharedLayers(a, b).length === 0) continue;
-      // Pads of the same footprint are never "connected" by proximity; their own pins define that.
-      if (a.kind === "pad" && b.kind === "pad" && a.pad.comp === b.pad.comp) {
-        if (a.pad.id === b.pad.id) uf.union(a.key, b.key);
-        continue;
+  // Pads sharing a number in one footprint are one pin, wherever they sit.
+  const pinPads = new Map<string, string>();
+  for (const it of items) {
+    if (it.kind !== "pad") continue;
+    const k = `${it.pad.comp}\u0000${it.pad.id}`;
+    const first = pinPads.get(k);
+    if (first) uf.union(first, it.key);
+    else pinPads.set(k, it.key);
+  }
+  // Proximity pairs (gap under 2 mm) from a spatial grid instead of every pair of items.
+  const CELL = 4;
+  const grid = new Map<string, number[]>();
+  const boxes = items.map((it) => {
+    const b = itemBox(it);
+    return { x0: b.x0 - 1, y0: b.y0 - 1, x1: b.x1 + 1, y1: b.y1 + 1 };
+  });
+  boxes.forEach((b, i) => {
+    for (let gx = Math.floor(b.x0 / CELL); gx <= Math.floor(b.x1 / CELL); gx++)
+      for (let gy = Math.floor(b.y0 / CELL); gy <= Math.floor(b.y1 / CELL); gy++) {
+        const k = `${gx},${gy}`;
+        if (!grid.has(k)) grid.set(k, []);
+        grid.get(k)!.push(i);
       }
-      const g = gap(a, b);
-      if (g < 2) pairs.push({ a, b, gap: g });
-      if (g <= 1e-6) uf.union(a.key, b.key);
+  });
+  const seen = new Set<number>();
+  for (const cell of grid.values()) {
+    for (let x = 0; x < cell.length; x++) {
+      for (let y = x + 1; y < cell.length; y++) {
+        const i = Math.min(cell[x], cell[y]);
+        const j = Math.max(cell[x], cell[y]);
+        const id = i * items.length + j;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const bi = boxes[i];
+        const bj = boxes[j];
+        if (bi.x1 < bj.x0 || bj.x1 < bi.x0 || bi.y1 < bj.y0 || bj.y1 < bi.y0) continue;
+        const a = items[i];
+        const b = items[j];
+        if (sharedLayers(a, b).length === 0) continue;
+        // Pads of the same footprint are never "connected" by proximity; their own pins define that.
+        if (a.kind === "pad" && b.kind === "pad" && a.pad.comp === b.pad.comp) continue;
+        const g = gap(a, b);
+        if (g < 2) pairs.push({ a, b, gap: g });
+        if (g <= 1e-6) uf.union(a.key, b.key);
+      }
     }
   }
 
@@ -172,16 +215,12 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
       for (let j = i + 1; j < zs.length; j++) {
         const a = zs[i];
         const b = zs[j];
-        if (a.net !== b.net || a.layer !== b.layer) continue;
-        const fa = fills.get(a.id)!;
-        const fb = fills.get(b.id)!;
-        if (!fb.islandAt || !fa.islandSamples || polygonPolygonDistance(a.points, b.points) > 0) continue;
-        fa.islandSamples.forEach((pts, k) => {
-          for (const p of pts) {
-            const m = fb.islandAt!(p);
-            if (m >= 0) uf.union(`zone:${a.id}:${k}`, `zone:${b.id}:${m}`);
-          }
-        });
+        if (a.net !== b.net || a.layer !== b.layer || polygonPolygonDistance(a.points, b.points) > 0) continue;
+        fills.get(a.id)!.polygons.forEach((pa, k) =>
+          fills.get(b.id)!.polygons.forEach((pb, m) => {
+            if (area(intersection(islandShape(pa), islandShape(pb))) > 1e-6) uf.union(`zone:${a.id}:${k}`, `zone:${b.id}:${m}`);
+          }),
+        );
       }
     }
   }
@@ -337,6 +376,20 @@ export function runDrc(design: Design): Issue[] {
         at: itemPos(a),
         refs: [a, b].flatMap((x) => (x.kind === "pad" ? [x.pad.ref] : [])),
       });
+    }
+  }
+
+  // Pours of different nets must not touch (equal priorities do not cut each other).
+  const zs = design.zones;
+  for (let i = 0; i < zs.length; i++) {
+    for (let j = i + 1; j < zs.length; j++) {
+      const a = zs[i];
+      const b = zs[j];
+      if (a.layer !== b.layer || a.net === b.net || polygonPolygonDistance(a.points, b.points) > 0) continue;
+      const fa = analysis.fills.get(a.id)!;
+      const fb = analysis.fills.get(b.id)!;
+      const hit = fa.polygons.find((pa) => fb.polygons.some((pb) => area(intersection(islandShape(pa), islandShape(pb))) > 1e-6));
+      if (hit) issues.push({ severity: "error", code: "short", message: `Pours of ${a.net} and ${b.net} overlap on ${a.layer} (give one a higher priority)`, at: hit[0][0] });
     }
   }
 

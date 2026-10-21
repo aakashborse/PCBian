@@ -358,7 +358,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       if (kind === 0 && /^true$/i.test(p.ISBOARDCUTOUT ?? "")) cutouts.push(pts);
       else if (kind === 0 && !keepout && polygon === NONE && net !== NONE && nets[net] && l >= ALTIUM_TOP && l <= ALTIUM_BOTTOM && pts.length >= 3) {
         note(l);
-        zones.push({ net: nets[net], layer: l as unknown as CopperLayer, points: pts, padConnection: "solid", priority: 1000 });
+        zones.push({ net: nets[net], layer: l as unknown as CopperLayer, points: pts, padConnection: "solid", priority: 1000, raw: true });
       }
     }
   }
@@ -390,7 +390,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
         [hw, hh],
         [-hw, hh],
       ].map(([x, y]) => ({ x: r4(c.x + x * Math.cos(t) - y * Math.sin(t)), y: r4(c.y + x * Math.sin(t) + y * Math.cos(t)) }));
-      zones.push({ net: nets[net], layer: layer as unknown as CopperLayer, points: pts, padConnection: "solid", priority: 1000 });
+      zones.push({ net: nets[net], layer: layer as unknown as CopperLayer, points: pts, padConnection: "solid", priority: 1000, raw: true });
     }
   }
 
@@ -412,7 +412,8 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
   for (const plane of new Set(planePolys.map((p) => p.layer))) {
     const polys = planePolys.filter((p) => p.layer === plane).sort((a, b) => area(b.points) - area(a.points));
     const layer = toLayer(plane);
-    if (layer) polys.forEach((p, i) => outZones.push({ net: p.net, layer, points: p.points, priority: i === 0 ? 0 : 1 }));
+    // Splits rank by size (smaller wins) so neighbouring splits keep clearance from each other.
+    if (layer) polys.forEach((p, i) => outZones.push({ net: p.net, layer, points: p.points, priority: i }));
   }
   for (const v of rawVias) vias.push({ ...v.at, diameter: v.dia, drill: v.hole, from: toLayer(v.a) ?? undefined, to: toLayer(v.b) ?? undefined, ...netField(v.net) });
 
@@ -461,7 +462,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
     const layers = p.layer === ALTIUM_MULTI ? allLayers : [toLayer(p.layer)].filter((l): l is CopperLayer => !!l);
     if (net && layers.length) {
       const outline = padOutline(p.at, p.size.x, p.size.y, p.shape === 1, normAngle(-p.dir));
-      for (const layer of layers) outZones.push({ net, layer, points: outline, padConnection: "solid", priority: 1000 });
+      for (const layer of layers) outZones.push({ net, layer, points: outline, padConnection: "solid", priority: 1000, raw: true });
       freeAreas++;
     }
     if (p.hole > 0) vias.push({ ...p.at, diameter: Math.max(p.hole + 0.1, Math.min(p.size.x, p.size.y)), drill: p.hole, ...(net ? { net } : {}) });

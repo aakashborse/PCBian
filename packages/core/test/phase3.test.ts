@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  onIsland,
   addZone,
   boardOutlineZone,
-  hatchHoles,
   ipc2581,
   odbFiles,
   parseXml,
@@ -401,13 +401,16 @@ describe("pour styles and fabrication outputs", () => {
     const doc = boardDoc(2);
     const d0 = getDesign(doc);
     const big = addZone(doc, { net: "GND", layer: "top", points: boardOutlineZone(d0.board) });
-    const small = addZone(doc, { net: "+5V", layer: "top", points: [{ x: 2, y: 2 }, { x: 8, y: 2 }, { x: 8, y: 8 }, { x: 2, y: 8 }], priority: 1, fill: "hatch", hatchWidth: 0.3, hatchGap: 0.8 });
+    const small = addZone(doc, { net: "+5V", layer: "top", points: [{ x: 2, y: 2 }, { x: 8, y: 2 }, { x: 8, y: 8 }, { x: 2, y: 8 }], priority: 1, fill: "hatch", hatchWidth: 0.3, hatchGap: 0.8, removeIslands: false });
     const d = getDesign(doc);
     const fb = zoneFill(d, d.zones.find((z) => z.id === big.id)!);
-    expect(fb.cutouts.some((c) => c.kind === "polygon" && c.points[0].x === 2)).toBe(true);
+    // The GND pour keeps clear of the +5V pour: no GND copper inside the small square.
+    expect(fb.polygons.some((isl) => onIsland(isl, { x: 5, y: 5 }))).toBe(false);
+    expect(fb.polygons.some((isl) => onIsland(isl, { x: 20, y: 20 }))).toBe(true);
     const fs = zoneFill(d, d.zones.find((z) => z.id === small.id)!);
     expect(fs.hatch).toMatchObject({ width: 0.3, gap: 0.8 });
-    expect(hatchHoles(fs).length).toBeGreaterThan(9);
+    // Hatching shows up as holes in the fill.
+    expect(fs.polygons.reduce((n, isl) => n + isl.length - 1, 0)).toBeGreaterThan(9);
     expect(runDrc(d).filter((i) => i.code === "short")).toEqual([]);
   });
 

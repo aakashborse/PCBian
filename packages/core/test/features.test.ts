@@ -73,7 +73,8 @@ describe("copper pours", () => {
     expect(runDrc(getDesign(doc)).filter((i) => i.severity === "error")).toEqual([]);
     const files = gerberFiles(getDesign(doc));
     expect(files["test-F_Cu.gtl"]).toContain("G36*");
-    expect(files["test-F_Cu.gtl"]).toContain("%LPC*%");
+    // Pours are plain dark regions: nothing in the image is ever cleared.
+    expect(files["test-F_Cu.gtl"]).not.toContain("%LPC*%");
   });
 });
 

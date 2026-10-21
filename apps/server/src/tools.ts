@@ -572,7 +572,7 @@ export const TOOLS = {
         ...(priority && { priority }),
       });
       const result = zoneFill(getDesign(doc), getDesign(doc).zones.find((x) => x.id === z.id)!);
-      return `Pour ${z.id} for ${net} on ${l}: ${result.islands.length} island(s) kept, ${result.removed.length ? "isolated islands removed" : "no isolated islands"}`;
+      return `Pour ${z.id} for ${net} on ${l}: ${result.islands.length} island(s) kept, ${result.removedIslands ? `${result.removedIslands} unconnected island(s) removed` : "no isolated islands"}`;
     },
     label: ({ net, layer: l }) => `Pour ${net} on ${l}`,
   }),

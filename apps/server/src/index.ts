@@ -141,6 +141,14 @@ app.get("/api/projects/:id/versions/:vid/diff", (req, res) => {
   res.json(d);
 });
 
+// A version's raw Yjs update, so a client can restore it into its own (undoable) history.
+app.get("/api/projects/:id/versions/:vid/update", (req, res) => {
+  const p = getProject(req.params.id);
+  const u = p && versionUpdate(p.id, req.params.vid);
+  if (!u) return void res.status(404).json({ error: "Not found" });
+  res.type("application/octet-stream").send(Buffer.from(u));
+});
+
 app.post("/api/projects/:id/versions/:vid/restore", (req, res) => {
   const p = getProject(req.params.id);
   const v = p && restoreVersion(getRoom(p.id), req.params.vid, String(req.body?.author ?? "Someone").slice(0, 40));

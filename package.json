@@ -13,7 +13,8 @@
     "build": "npm run build -w @pcbian/web",
     "start": "npm run start -w @pcbian/server",
     "typecheck": "tsc -p packages/core && tsc -p apps/server && tsc -p apps/web",
-    "test": "vitest run"
+    "test": "vitest run",
+    "fabcheck": "sh tools/fabcheck/run.sh"
   },
   "devDependencies": {
     "concurrently": "^10.0.6",

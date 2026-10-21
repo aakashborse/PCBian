@@ -8,11 +8,11 @@ import { courtyardRect, ovalAxis, padCorners, padsOf, type WorldPad } from "./ge
 import { getPart } from "./library";
 import { netByTerminal, termKey } from "./netlist";
 import { copperLayers, viaKind, viaLayers } from "./stackup";
-import { hatchHoles, type Cutout } from "./zones";
+import { zonesInDrawOrder } from "./zones";
 import type { CopperLayer, Design, Side, Vec } from "./types";
 
 export type Feature =
-  | { kind: "surface"; points: Vec[]; dark: boolean; net?: string }
+  | { kind: "surface"; points: Vec[]; holes?: Vec[][]; dark: boolean; net?: string }
   | { kind: "line"; points: Vec[]; width: number; dark: boolean; net?: string }
   | { kind: "pad"; shape: "rect" | "circle" | "oval"; at: Vec; w: number; h: number; dark: boolean; net?: string; ref?: string; pin?: string };
 
@@ -34,13 +34,6 @@ export interface FabData {
 }
 
 const circle = (c: Vec, r: number, n = 24): Vec[] => Array.from({ length: n }, (_, i) => ({ x: c.x + r * Math.cos((2 * Math.PI * i) / n), y: c.y + r * Math.sin((2 * Math.PI * i) / n) }));
-
-function cutoutFeature(c: Cutout, dark: boolean, net?: string): Feature {
-  if (c.kind === "rect") return { kind: "pad", shape: "rect", at: { x: (c.rect.x0 + c.rect.x1) / 2, y: (c.rect.y0 + c.rect.y1) / 2 }, w: c.rect.x1 - c.rect.x0, h: c.rect.y1 - c.rect.y0, dark, net };
-  if (c.kind === "circle") return { kind: "pad", shape: "circle", at: c.c, w: 2 * c.r, h: 2 * c.r, dark, net };
-  if (c.kind === "polygon") return { kind: "surface", points: c.points, dark, net };
-  return { kind: "line", points: c.points, width: c.width, dark, net };
-}
 
 /** A pad feature of the given size; angled pads become exact surfaces (rects) or round lines (ovals). */
 function padFeature(p: WorldPad, w: number, h: number, dark: boolean, extra: { net?: string; ref?: string; pin?: string } = {}, shape: WorldPad["shape"] = p.shape): Feature {
@@ -64,17 +57,9 @@ export function fabData(design: Design): FabData {
   }
   const copper = layers.map((layer) => {
     const f: Feature[] = [];
-    for (const z of design.zones.filter((z) => z.layer === layer)) {
-      const fill = zoneFill(design, z, analysis);
-      f.push({ kind: "surface", points: z.points, dark: true, net: z.net });
-      if (fill.hatch) {
-        for (const r of hatchHoles(fill)) f.push(cutoutFeature({ kind: "rect", rect: r }, false));
-        for (const h of fill.halos) f.push(cutoutFeature(h, true, z.net));
-      }
-      for (const c of fill.cutouts) f.push(cutoutFeature(c, false));
-      for (const sp of fill.spokes) f.push({ kind: "line", points: sp.points, width: sp.width, dark: true, net: z.net });
-      for (const c of fill.clip) f.push(cutoutFeature(c, false));
-      for (const r of fill.removed) f.push(cutoutFeature({ kind: "rect", rect: r }, false));
+    for (const z of zonesInDrawOrder(design, layer)) {
+      // Pours are plain copper islands (with holes), so the layer image needs no clear polarity.
+      for (const island of zoneFill(design, z, analysis).polygons) f.push({ kind: "surface", points: island[0], holes: island.slice(1), dark: true, net: z.net });
     }
     for (const td of drops.filter((t) => t.layer === layer)) f.push({ kind: "surface", points: td.points, dark: true });
     for (const c of parts)

@@ -5,11 +5,16 @@
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "sideEffects": false,
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
     "cfb": "^1.2.2",
+    "clipper-lib": "^6.4.2",
     "yjs": "^13.6.33"
+  },
+  "devDependencies": {
+    "@types/clipper-lib": "^6.4.0"
   }
 }

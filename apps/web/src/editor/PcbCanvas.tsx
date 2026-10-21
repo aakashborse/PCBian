@@ -21,7 +21,6 @@ import {
   deletePcbGraphic,
   setBoard,
   setBoardOutline,
-  type Cutout,
   analyzeCopper,
   autoPlace,
   autoRoute,
@@ -456,43 +455,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
                       const pts = z.points.map((p) => `${p.x},${p.y}`).join(" ");
                       return (
                         <g key={z.id}>
-                          <mask id={`zm-${z.id}`} maskUnits="userSpaceOnUse">
-                            <polygon points={pts} fill="white" />
-                            {(() => {
-                              const f = fills.get(z.id);
-                              if (!f) return null;
-                              const shape = (c: Cutout, i: number, color: string) =>
-                                c.kind === "rect" ? (
-                                  <rect key={i} x={c.rect.x0} y={c.rect.y0} width={c.rect.x1 - c.rect.x0} height={c.rect.y1 - c.rect.y0} fill={color} />
-                                ) : c.kind === "circle" ? (
-                                  <circle key={i} cx={c.c.x} cy={c.c.y} r={c.r} fill={color} />
-                                ) : c.kind === "polygon" ? (
-                                  <polygon key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} fill={color} />
-                                ) : (
-                                  <polyline key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} stroke={color} strokeWidth={c.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                                );
-                              const hw = f.hatch?.width ?? 0;
-                              return (
-                                <>
-                                  {f.hatch && (
-                                    <>
-                                      <pattern id={`hp-${z.id}`} patternUnits="userSpaceOnUse" x={f.hatch.origin.x} y={f.hatch.origin.y} width={hw + f.hatch.gap} height={hw + f.hatch.gap}>
-                                        <rect x={hw} y={hw} width={f.hatch.gap} height={f.hatch.gap} fill="black" />
-                                      </pattern>
-                                      <polygon points={pts} fill={`url(#hp-${z.id})`} />
-                                      <polygon points={pts} fill="none" stroke="white" strokeWidth={2 * hw} />
-                                      {f.halos.map((c, i) => shape(c, 40000 + i, "white"))}
-                                    </>
-                                  )}
-                                  {f.cutouts.map((c, i) => shape(c, i, "black"))}
-                                  {f.spokes.map((sp, i) => shape({ kind: "line", points: sp.points, width: sp.width }, 10000 + i, "white"))}
-                                  {f.clip.map((c, i) => shape(c, 20000 + i, "black"))}
-                                  {f.removed.map((r, i) => shape({ kind: "rect", rect: r }, 30000 + i, "black"))}
-                                </>
-                              );
-                            })()}
-                          </mask>
-                          <polygon points={pts} fill={layerColor(l)} opacity={0.42} mask={`url(#zm-${z.id})`} />
+                          {/* The computed fill: islands with holes, drawn even-odd. */}
+                          <path d={(fills.get(z.id)?.polygons ?? []).flatMap((isl) => isl.map((ring) => `M${ring.map((p) => `${p.x},${p.y}`).join("L")}Z`)).join("")} fill={layerColor(l)} fillRule="evenodd" opacity={0.42} />
                           <polygon points={pts} fill="none" stroke={sel ? "#ffffff" : layerColor(l)} strokeWidth={px * (sel ? 2 : 1)} strokeDasharray={`${px * 6} ${px * 4}`} />
                         </g>
                       );

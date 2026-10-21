@@ -137,7 +137,7 @@ export interface PcbData {
   footprints: PcbFootprint[];
   traces: { layer: CopperLayer; width: number; points: Vec[]; net?: string }[];
   vias: { x: number; y: number; diameter: number; drill: number; from?: CopperLayer; to?: CopperLayer; net?: string }[];
-  zones: ({ net: string; layer: CopperLayer; points: Vec[] } & ReturnType<typeof zoneStyle>)[];
+  zones: ({ net: string; layer: CopperLayer; points: Vec[]; raw?: boolean } & ReturnType<typeof zoneStyle>)[];
   keepouts: { layers: CopperLayer[]; points: Vec[]; noTracks: boolean; noVias: boolean; noPours: boolean; name?: string }[];
   /** Design rules carried by the source file, in PCBian's rule language. */
   rules?: string;

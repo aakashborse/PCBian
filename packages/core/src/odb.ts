@@ -32,7 +32,7 @@ function featuresFile(features: Feature[], H: number): string {
     } else if (f.kind === "pad") {
       const name = f.shape === "circle" ? `r${um(f.w)}` : f.shape === "oval" ? `oval${um(f.w)}x${um(f.h)}` : `rect${um(f.w)}x${um(f.h)}`;
       body.push(`P ${mm(f.at.x)} ${y(f.at.y)} ${sym(name)} ${pol} 0 0`);
-    } else body.push(...surface(f.points, pol, H));
+    } else body.push(...surface(f.points, pol, H, f.holes));
   }
   return ["UNITS=MM", "#", "#Feature symbol names", "#", ...symbols.map((s, i) => `$${i} ${s}`), "#", "#Layer features", "#", ...body, ""].join("\n");
 }

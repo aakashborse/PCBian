@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  onIsland,
   addComponent,
   addKeepout,
   addSheet,
@@ -158,9 +159,12 @@ describe("pour fills", () => {
     addTrace(doc, { layer: "top", width: 0.4, points: ring });
     const d = getDesign(doc);
     const fill = zoneFill(d, d.zones.find((x) => x.id === z.id)!);
-    expect(fill.spokes.length).toBeGreaterThan(0);
-    expect(fill.removed.length).toBeGreaterThan(0);
+    // The pocket inside the +5V ring connects to nothing and is dropped.
+    expect(fill.removedIslands).toBeGreaterThan(0);
     expect(fill.islands.length).toBeGreaterThan(0);
+    expect(fill.polygons.some((isl) => onIsland(isl, { x: 6, y: 25 }))).toBe(false);
+    // Thermal reliefs: holes around GND pads, crossed by spokes.
+    expect(fill.polygons.reduce((n, isl) => n + isl.length - 1, 0)).toBeGreaterThan(0);
     const a = analyzeCopper(d);
     expect(ratsnest(d, a).filter((r) => r.net === "GND")).toEqual([]);
   });

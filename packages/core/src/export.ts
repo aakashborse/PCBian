@@ -2,11 +2,12 @@
 import { courtyardRect, ovalAxis, padCorners, padsOf, toWorld, type WorldPad } from "./geometry";
 import { getPart } from "./library";
 import { computeNets } from "./netlist";
-import { analyzeCopper, boardTeardrops, zoneFill, type Cutout } from "./copper";
+import { analyzeCopper, boardTeardrops, zoneFill } from "./copper";
 import { boardOutline } from "./doc";
 import { copperLayers, layerLabel, stackupOf, stackupThickness, viaKind, viaLayers } from "./stackup";
 import { strokeText } from "./font";
-import { hatchHoles } from "./zones";
+import { fracture } from "./poly";
+import { zonesInDrawOrder } from "./zones";
 import type { ComponentData, CopperLayer, Design, Shape, Side, Vec, Via } from "./types";
 
 export function bomCsv(design: Design): string {
@@ -144,33 +145,8 @@ export function gerberFiles(design: Design): Record<string, string> {
   layers.forEach((layer, i) => {
     const pos = i === 0 ? "Top" : i === layers.length - 1 ? "Bot" : "Inr";
     const cu = new Gerber(`Copper,L${i + 1},${pos}`, H);
-    // Pours first: dark region, clear cut-outs, dark thermal spokes, clear again to clip spokes, clear removed islands.
-    for (const z of design.zones.filter((z) => z.layer === layer)) {
-      const fill = zoneFill(design, z, analysis!);
-      const clear = (c: Cutout) => {
-        if (c.kind === "rect") cu.flash("R", c.rect.x1 - c.rect.x0, c.rect.y1 - c.rect.y0, { x: (c.rect.x0 + c.rect.x1) / 2, y: (c.rect.y0 + c.rect.y1) / 2 });
-        else if (c.kind === "circle") cu.flash("C", c.r * 2, c.r * 2, c.c);
-        else if (c.kind === "polygon") cu.region(c.points);
-        else cu.polyline(c.width, c.points);
-      };
-      cu.polarity(true);
-      cu.region(z.points);
-      if (fill.hatch) {
-        // Hatched pour: punch the mesh holes, then restore solid copper around same-net pads and vias.
-        cu.polarity(false);
-        for (const r of hatchHoles(fill)) clear({ kind: "rect", rect: r });
-        cu.polarity(true);
-        fill.halos.forEach(clear);
-      }
-      cu.polarity(false);
-      fill.cutouts.forEach(clear);
-      cu.polarity(true);
-      for (const sp of fill.spokes) cu.polyline(sp.width, sp.points);
-      cu.polarity(false);
-      fill.clip.forEach(clear);
-      for (const r of fill.removed) clear({ kind: "rect", rect: r });
-      cu.polarity(true);
-    }
+    // Pours first, as plain dark regions (holes joined to their outline by cut-ins).
+    for (const z of zonesInDrawOrder(design, layer)) for (const island of zoneFill(design, z, analysis!).polygons) cu.region(fracture(island));
     for (const td of drops.filter((t) => t.layer === layer)) cu.region(td.points);
     for (const c of allParts) {
       for (const p of padsOf(c)) {

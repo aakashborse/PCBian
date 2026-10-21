@@ -65,7 +65,8 @@ export function ipc2581(design: Design): string {
       const pin = f.ref ? `<PinRef componentRef="${esc(f.ref)}" pin="${esc(f.pin ?? "")}"/>` : "";
       return `<Set polarity="${pol}"${net}${f.ref ? ` padUsage="TERMINATION"` : ""}><Pad><Location x="${n(at.x)}" y="${n(at.y)}"/><StandardPrimitiveRef id="${prim(f)}"/>${pin}</Pad></Set>`;
     }
-    return `<Set polarity="${pol}"${net}><Features><Contour>${poly(f.points)}</Contour></Features></Set>`;
+    const cut = (f.holes ?? []).map((h) => `<Cutout>${poly(h).replace(/^<Polygon>|<\/Polygon>$/g, "")}</Cutout>`).join("");
+    return `<Set polarity="${pol}"${net}><Features><Contour>${poly(f.points)}${cut}</Contour></Features></Set>`;
   };
   const layerFeature = (ref: string, feats: Feature[]) => (feats.length ? `<LayerFeature layerRef="${ref}">${feats.map(featureSet).join("")}</LayerFeature>` : "");
 

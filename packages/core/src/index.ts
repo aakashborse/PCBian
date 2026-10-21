@@ -27,3 +27,5 @@ export * from "./eagle-import";
 export * from "./altium-import";
 export * from "./rules";
 export * from "./altium-sch";
+export * from "./fabexpect";
+export * from "./poly";

@@ -64,6 +64,11 @@ export const api = {
   versions: (id: string) => call<VersionMeta[]>("GET", `/api/projects/${id}/versions`),
   saveVersion: (id: string, name: string, author: string) => call<VersionMeta>("POST", `/api/projects/${id}/versions`, { name, author }),
   versionDiff: (id: string, vid: string) => call<{ diff: DesignDiff; summary: string }>("GET", `/api/projects/${id}/versions/${vid}/diff`),
+  versionUpdate: async (id: string, vid: string) => {
+    const res = await fetch(`/api/projects/${id}/versions/${vid}/update`);
+    if (!res.ok) throw new Error(`Version not found (${res.status})`);
+    return new Uint8Array(await res.arrayBuffer());
+  },
   restoreVersion: (id: string, vid: string, author: string) => call<VersionMeta>("POST", `/api/projects/${id}/versions/${vid}/restore`, { author }),
   branchVersion: (id: string, vid: string, name: string, author: string) => call<ProjectMeta>("POST", `/api/projects/${id}/versions/${vid}/branch`, { name, author }),
 };

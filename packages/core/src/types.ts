@@ -207,6 +207,8 @@ export interface Zone {
   spokeWidth?: number;
   /** Remove fill islands not connected to the zone's net (default true). */
   removeIslands?: boolean;
+  /** Copper exactly as drawn (imported solid regions and fills): no clearances, reliefs or island removal. */
+  raw?: boolean;
 }
 
 export interface NetClass {

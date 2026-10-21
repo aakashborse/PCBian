@@ -37,11 +37,12 @@ import {
   type CopperLayer,
   type NetClass,
 } from "@pcbian/core";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { useEditor } from "./context";
-import { PartEditor } from "./PartEditor";
 import { StackupCard } from "./Stackup";
 import { DiffPairsCard, LengthGroupsCard, TraceLengthTuner } from "./Routing";
+
+const PartEditor = lazy(() => import("./PartEditor").then((m) => ({ default: m.PartEditor })));
 
 export function NumField({ label, value, onChange, step = 0.05, min = 0 }: { label: string; value: number; onChange: (v: number) => void; step?: number; min?: number }) {
   const shown = String(Math.round(value * 1000) / 1000);
@@ -225,7 +226,11 @@ export function Inspector() {
             Delete {c.ref}
           </button>
         </div>
-        {editing === c.id && <PartEditor comp={c} onClose={() => setEditing(null)} />}
+        {editing === c.id && (
+          <Suspense fallback={null}>
+            <PartEditor comp={c} onClose={() => setEditing(null)} />
+          </Suspense>
+        )}
       </div>
     );
   }

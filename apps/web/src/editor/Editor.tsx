@@ -1,5 +1,5 @@
 import { computeNets, type Vec } from "@pcbian/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { navigate } from "../lib/router";
 import { useDesign, useProjectConnection } from "../lib/useProject";
@@ -7,17 +7,21 @@ import { useUser } from "../lib/user";
 import { HistoryPanel } from "./History";
 import { ReviewPanel } from "./Review";
 import { initials, UserBadge } from "../pages/UserBadge";
-import { Board3D } from "./Board3D";
 import { Checks } from "./Checks";
 import { EditorContext, type EditorState, type FocusRequest, type Selection, type ViewMode } from "./context";
 import { Copilot } from "./Copilot";
-import { exporters } from "./exporters";
 import { Inspector } from "./Inspector";
 import { Library } from "./Library";
 import { PcbCanvas } from "./PcbCanvas";
 import { usePresence } from "./presence";
 import { SchematicCanvas } from "./SchematicCanvas";
-import { Simulation } from "./Simulation";
+
+// Heavy, occasionally used parts load on demand: three.js for 3D, the simulator UI, and the
+// exporters (with their zip/PDF/STEP writers).
+const Board3D = lazy(() => import("./Board3D").then((m) => ({ default: m.Board3D })));
+const Simulation = lazy(() => import("./Simulation").then((m) => ({ default: m.Simulation })));
+const exporters = () => import("./exporters").then((m) => m.exporters);
+const Loading = () => <div className="hint">Loading…</div>;
 
 type RightTab = "copilot" | "inspect" | "checks" | "sim" | "review" | "history";
 
@@ -188,19 +192,19 @@ export function Editor({ projectId }: { projectId: string }) {
               <div className="menu" onMouseLeave={() => setMenu(false)}>
                 {(
                   [
-                    ["Gerber + drill (fabrication .zip)", () => exporters.gerbers(design)],
-                    ["Schematic (.pdf)", () => exporters.schematicPdf(design)],
-                    ["Schematic (.svg)", () => exporters.svg(design)],
-                    ["Assembly drawing (.pdf)", () => exporters.assemblyPdf(design)],
-                    ["3D model (.step)", () => exporters.step(design)],
-                    ["IPC-2581 (.xml)", () => exporters.ipc2581(design)],
-                    ["ODB++ (.zip)", () => exporters.odb(design)],
-                    ["Bill of materials (.csv)", () => exporters.bom(design)],
-                    ["Pick and place (.csv)", () => exporters.pnp(design)],
-                    ["KiCad board (.kicad_pcb)", () => exporters.kicadPcb(design)],
-                    ["KiCad netlist (.net)", () => exporters.kicadNet(design)],
-                    ["Netlist (.txt)", () => exporters.netlist(design)],
-                    ["Project data (.json)", () => exporters.json(design)],
+                    ["Gerber + drill (fabrication .zip)", async () => (await exporters()).gerbers(design)],
+                    ["Schematic (.pdf)", async () => (await exporters()).schematicPdf(design)],
+                    ["Schematic (.svg)", async () => (await exporters()).svg(design)],
+                    ["Assembly drawing (.pdf)", async () => (await exporters()).assemblyPdf(design)],
+                    ["3D model (.step)", async () => (await exporters()).step(design)],
+                    ["IPC-2581 (.xml)", async () => (await exporters()).ipc2581(design)],
+                    ["ODB++ (.zip)", async () => (await exporters()).odb(design)],
+                    ["Bill of materials (.csv)", async () => (await exporters()).bom(design)],
+                    ["Pick and place (.csv)", async () => (await exporters()).pnp(design)],
+                    ["KiCad board (.kicad_pcb)", async () => (await exporters()).kicadPcb(design)],
+                    ["KiCad netlist (.net)", async () => (await exporters()).kicadNet(design)],
+                    ["Netlist (.txt)", async () => (await exporters()).netlist(design)],
+                    ["Project data (.json)", async () => (await exporters()).json(design)],
                   ] as const
                 ).map(([label, fn]) => (
                   <button
@@ -223,7 +227,11 @@ export function Editor({ projectId }: { projectId: string }) {
         </aside>
 
         <main className="main">
-          {mode === "schematic" ? <SchematicCanvas presence={presence} /> : mode === "pcb" ? <PcbCanvas presence={presence} /> : <Board3D />}
+          {mode === "schematic" ? <SchematicCanvas presence={presence} /> : mode === "pcb" ? <PcbCanvas presence={presence} /> : (
+            <Suspense fallback={<Loading />}>
+              <Board3D />
+            </Suspense>
+          )}
         </main>
 
         <aside className="right">
@@ -252,7 +260,11 @@ export function Editor({ projectId }: { projectId: string }) {
           {tab === "checks" && <Checks />}
           {tab === "review" && <ReviewPanel />}
           {tab === "history" && <HistoryPanel />}
-          {tab === "sim" && <Simulation />}
+          {tab === "sim" && (
+            <Suspense fallback={<Loading />}>
+              <Simulation />
+            </Suspense>
+          )}
         </aside>
       </div>
       {toastMsg && <div className="toast">{toastMsg}</div>}

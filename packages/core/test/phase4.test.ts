@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   addComponent,
+  addZone,
+  fracture,
   addKeepout,
   addTrace,
   altiumQuery,
@@ -116,5 +118,38 @@ describe("custom design rules", () => {
     expect(altiumQuery("InNetClass('PWR') and not IsVia", "A", new Map([["PWR", ["VCC", "3V3"]]]))).toBe("(A.NetName == 'VCC' || A.NetName == '3V3') && ! A.Type == 'via'");
     expect(altiumQuery("TouchesRoom('R1') or OnTopSilkscreen", "B")).toBe("B.intersectsArea('R1') || false");
     expect(() => altiumQuery("IsDiffPair", "A")).toThrow();
+  });
+});
+
+describe("exact pour geometry", () => {
+  it("fractures islands with holes into one contour of the right area", () => {
+    const outer = [
+      { x: 0, y: 0 },
+      { x: 10, y: 0 },
+      { x: 10, y: 10 },
+      { x: 0, y: 10 },
+    ];
+    const hole = (x: number, y: number) => [
+      { x, y },
+      { x: x + 2, y },
+      { x: x + 2, y: y + 2 },
+      { x, y: y + 2 },
+    ];
+    const c = fracture([outer, hole(2, 2), hole(6, 6), hole(6, 2)]);
+    const a = Math.abs(c.reduce((s, p, i) => s + p.x * c[(i + 1) % c.length].y - c[(i + 1) % c.length].x * p.y, 0) / 2);
+    expect(a).toBeCloseTo(100 - 3 * 4, 6);
+  });
+
+  it("reports pours of different nets that touch", () => {
+    const doc = newDoc();
+    const sq = (x: number) => [
+      { x, y: 5 },
+      { x: x + 10, y: 5 },
+      { x: x + 10, y: 15 },
+      { x, y: 15 },
+    ];
+    addZone(doc, { net: "A", layer: "top", points: sq(5), removeIslands: false });
+    addZone(doc, { net: "B", layer: "top", points: sq(10), removeIslands: false });
+    expect(runDrc(getDesign(doc)).some((i) => i.code === "short" && /Pours of A and B/.test(i.message))).toBe(true);
   });
 });
