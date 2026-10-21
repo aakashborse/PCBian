@@ -305,7 +305,7 @@ describe("SPICE models and sweeps", () => {
 .ends
 `;
   it("parses model cards with suffixes and continuations", () => {
-    const { models, warnings } = parseSpiceModels(MODELS);
+    const { models, subckts, warnings } = parseSpiceModels(MODELS);
     expect(models.map((m) => [m.name, m.type])).toEqual([
       ["1N4148", "D"],
       ["2N3906", "PNP"],
@@ -316,7 +316,9 @@ describe("SPICE models and sweeps", () => {
     expect(models[1].params.IKF).toBeCloseTo(0.08, 9);
     expect(spiceNumber("2.2MEG")).toBe(2.2e6);
     expect(spiceNumber("10m")).toBeCloseTo(0.01, 12);
-    expect(warnings.some((w) => /subckt/.test(w))).toBe(true);
+    // Subcircuits are imported too (see subckt.test.ts).
+    expect(subckts.map((x) => [x.name, x.ports])).toEqual([["FOO", ["1", "2"]]]);
+    expect(warnings).toEqual([]);
   });
 
   function circuit(build: (doc: Y.Doc) => void) {
