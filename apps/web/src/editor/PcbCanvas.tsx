@@ -219,7 +219,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("input, textarea, select")) return;
+      // Shortcuts belong to the canvas, not to a dialog open over it.
+      if ((e.target as HTMLElement).closest("input, textarea, select") || document.querySelector(".modal-backdrop")) return;
       const k = e.key.toLowerCase();
       if (e.metaKey || e.ctrlKey) return;
       if (e.key === "Escape") {

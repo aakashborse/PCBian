@@ -31,3 +31,4 @@ export * from "./fabexpect";
 export * from "./poly";
 export * from "./supplier";
 export * from "./channels";
+export * from "./symbol-edit";

@@ -1,7 +1,8 @@
-import { addCustomPart, componentsMap, getPart, icSymbol, packageFootprint, partsMap, type ComponentData, type Footprint, type Pad, type PackageSpec, type PartDef, type PinType, type Shape, type Vec } from "@pcbian/core";
+import { addCustomPart, componentsMap, finishSymbol, getPart, icSymbol, packageFootprint, partsMap, type ComponentData, type Footprint, type Pad, type PackageSpec, type PartDef, type PinType, type Shape, type Vec } from "@pcbian/core";
 import { useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
 import { ShapeEl, SymbolBody } from "./render";
+import { SymbolDraw, type Drawing } from "./SymbolDraw";
 
 const PIN_TYPES: PinType[] = ["passive", "input", "output", "bidirectional", "tristate", "power_in", "power_out", "open_collector", "unspecified", "nc"];
 
@@ -54,11 +55,10 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
   const users = design.components.filter((c) => c.partId === original.id);
 
   const sameIds = pins.length === original.symbol.pins.length && pins.every((p) => original.symbol.pins.some((o) => o.id === p.number));
-  const [keepGraphics, setKeepGraphics] = useState(original.symbol.shapes.every((s) => s.kind !== "rect") || pins.length <= 3);
-  const symbol = useMemo(() => {
-    if (keepGraphics && sameIds) {
-      return { ...original.symbol, pins: original.symbol.pins.map((o) => ({ ...o, ...((r) => (r ? { name: r.name, type: r.type, showName: o.showName } : {}))(pins.find((p) => p.number === o.id)) })) };
-    }
+  /** How the symbol is drawn: an automatic box, the part's original drawing, or by hand. */
+  const [mode, setMode] = useState<"box" | "original" | "draw">(original.symbol.shapes.every((s) => s.kind !== "rect") || pins.length <= 3 || isCustom ? "original" : "box");
+  const [drawing, setDrawing] = useState<Drawing | null>(null);
+  const boxSymbol = () => {
     const sym = icSymbol(
       pins.filter((p) => p.side === "left").map((p) => [p.number, p.name]),
       pins.filter((p) => p.side === "right").map((p) => [p.number, p.name]),
@@ -66,7 +66,24 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
     );
     for (const p of sym.pins) p.type = pins.find((r) => r.number === p.id)?.type ?? "passive";
     return sym;
-  }, [pins, keepGraphics, sameIds, name, original.symbol]);
+  };
+  const symbol = useMemo(() => {
+    if (mode === "draw" && drawing) {
+      // The pin table owns numbers, names and types; the drawing owns where each pin sits.
+      const drawn = drawing.pins.flatMap((d) => ((r) => (r ? [{ ...d, name: r.name, type: r.type }] : []))(pins.find((p) => p.number === d.id)));
+      return finishSymbol({ shapes: drawing.shapes, pins: drawn, units: original.symbol.units });
+    }
+    if (mode === "original" && sameIds) {
+      return { ...original.symbol, pins: original.symbol.pins.map((o) => ({ ...o, ...((r) => (r ? { name: r.name, type: r.type, showName: o.showName } : {}))(pins.find((p) => p.number === o.id)) })) };
+    }
+    return boxSymbol();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pins, mode, drawing, sameIds, name, original.symbol]);
+  const startDrawing = () => {
+    // Start from whatever is shown now, so a box or the original can be reshaped.
+    setDrawing({ shapes: symbol.shapes.map((x) => ({ ...x })), pins: symbol.pins.map((x) => ({ ...x })) });
+    setMode("draw");
+  };
 
   const pinIds = new Set(pins.map((p) => p.number));
   const padIds = new Set(pads.map((p) => p.id));
@@ -74,10 +91,12 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
     ...[...padIds].filter((id) => !pinIds.has(id)).map((id) => `Pad ${id} has no matching pin`),
     ...(pads.length ? [...pinIds].filter((id) => !padIds.has(id)).map((id) => `Pin ${id} has no pad`) : []),
     ...(new Set(pins.map((p) => p.number)).size !== pins.length ? ["Pin numbers must be unique"] : []),
+    ...(mode === "draw" && drawing ? pins.filter((p) => !drawing.pins.some((d) => d.id === p.number)).map((p) => `Pin ${p.number} is not placed on the drawing`) : []),
   ];
 
   const save = () => {
-    if (problems.some((p) => /no matching pin|unique/.test(p))) return toast(problems[0]);
+    const blocking = problems.find((p) => /no matching pin|unique|not placed/.test(p));
+    if (blocking) return toast(blocking);
     const footprint: Footprint | null = pads.length ? { name: fpName, pads, courtyard: autoCourtyard(pads), silk } : null;
     const part: PartDef = {
       ...original,
@@ -136,7 +155,11 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
                 </thead>
                 <tbody>
                   {pins.map((p, i) => {
-                    const upd = (patch: Partial<PinRow>) => setPins(pins.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+                    const upd = (patch: Partial<PinRow>) => {
+                      setPins(pins.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+                      // A renumbered pin keeps its place on a hand drawing.
+                      if (patch.number !== undefined && drawing) setDrawing({ ...drawing, pins: drawing.pins.map((d) => (d.id === p.number ? { ...d, id: patch.number! } : d)) });
+                    };
                     return (
                       <tr key={i}>
                         <td>
@@ -161,7 +184,14 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
                           </select>
                         </td>
                         <td>
-                          <button className="ghost small danger" onClick={() => setPins(pins.filter((_, j) => j !== i))} title="Remove pin">
+                          <button
+                            className="ghost small danger"
+                            onClick={() => {
+                              setPins(pins.filter((_, j) => j !== i));
+                              if (drawing) setDrawing({ ...drawing, pins: drawing.pins.filter((d) => d.id !== p.number) });
+                            }}
+                            title="Remove pin"
+                          >
                             ×
                           </button>
                         </td>
@@ -174,13 +204,28 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
                 <button className="small" onClick={() => setPins([...pins, { number: String(pins.length + 1), name: `P${pins.length + 1}`, side: pins.length % 2 ? "right" : "left", type: "passive" }])}>
                   + Pin
                 </button>
-                <label className="small row" style={{ gap: 4 }} title="Keep the original drawing (only possible while pin numbers are unchanged)">
-                  <input type="checkbox" checked={keepGraphics && sameIds} disabled={!sameIds} onChange={(e) => setKeepGraphics(e.target.checked)} />
-                  Keep original graphics
-                </label>
+              </div>
+              <div className="row" style={{ marginTop: 8, gap: 4 }}>
+                <span className="small muted">Drawing</span>
+                <div className="tabs">
+                  <button className={mode === "box" ? "on" : ""} onClick={() => setMode("box")} title="A box with the pins down its sides (the Side column)">
+                    Box
+                  </button>
+                  <button className={mode === "original" ? "on" : ""} disabled={!sameIds} onClick={() => setMode("original")} title="The part's own drawing (only while pin numbers are unchanged)">
+                    Original
+                  </button>
+                  <button className={mode === "draw" ? "on" : ""} onClick={() => (drawing ? setMode("draw") : startDrawing())} title="Draw the body and place pins by hand">
+                    Draw
+                  </button>
+                </div>
+                {mode === "draw" && (
+                  <button className="small ghost" onClick={startDrawing} title="Throw away the hand drawing and start again from the box">
+                    Restart
+                  </button>
+                )}
               </div>
             </div>
-            <SymbolPreview part={{ ...original, name, symbol }} />
+            {mode === "draw" && drawing ? <SymbolDraw drawing={drawing} onChange={setDrawing} pinTable={pins.map((p) => ({ number: p.number, name: p.name, type: p.type }))} /> : <SymbolPreview part={{ ...original, name, symbol }} />}
           </div>
         ) : (
           <FootprintEditor pads={pads} setPads={setPads} silk={silk} setSilk={setSilk} sel={selPad} setSel={setSelPad} pinCount={pins.length} fpName={fpName} setFpName={setFpName} />

@@ -901,3 +901,28 @@ fieldset.plain:disabled {
   font-size: 12px;
   z-index: 5;
 }
+
+/* ---------- free-hand symbol drawing ---------- */
+.sym-draw {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.sym-tools,
+.sym-opts {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.sym-opts {
+  min-height: 26px;
+}
+.sym-opts select,
+.sym-opts input {
+  padding: 2px 4px;
+  font-size: 12px;
+}
+.sym-canvas {
+  height: 340px;
+  touch-action: none;
+}

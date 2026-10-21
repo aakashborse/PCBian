@@ -184,7 +184,8 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   // Keyboard shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).closest("input, textarea, select")) return;
+      // Shortcuts belong to the canvas, not to a dialog open over it.
+      if ((e.target as HTMLElement).closest("input, textarea, select") || document.querySelector(".modal-backdrop")) return;
       const k = e.key.toLowerCase();
       const mod = e.metaKey || e.ctrlKey;
       if (channel && ((!mod && ["delete", "backspace", "r", "m", "q"].includes(k)) || (mod && k === "d"))) {
