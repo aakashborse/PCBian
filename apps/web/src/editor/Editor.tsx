@@ -21,10 +21,11 @@ import { SchematicCanvas } from "./SchematicCanvas";
 // exporters (with their zip/PDF/STEP writers).
 const Board3D = lazy(() => import("./Board3D").then((m) => ({ default: m.Board3D })));
 const Simulation = lazy(() => import("./Simulation").then((m) => ({ default: m.Simulation })));
+const Analysis = lazy(() => import("./Analysis").then((m) => ({ default: m.Analysis })));
 const exporters = () => import("./exporters").then((m) => m.exporters);
 const Loading = () => <div className="hint">Loading…</div>;
 
-type RightTab = "copilot" | "inspect" | "checks" | "bom" | "sim" | "review" | "history";
+type RightTab = "copilot" | "inspect" | "checks" | "bom" | "sim" | "analysis" | "review" | "history";
 
 export function Editor({ projectId }: { projectId: string }) {
   const { conn, synced, online } = useProjectConnection(projectId);
@@ -252,6 +253,9 @@ export function Editor({ projectId }: { projectId: string }) {
             <button className={tab === "sim" ? "on" : ""} onClick={() => setTab("sim")}>
               Sim
             </button>
+            <button className={tab === "analysis" ? "on" : ""} onClick={() => setTab("analysis")} title="Signal integrity, power integrity and thermal analysis">
+              Analysis
+            </button>
             <button className={tab === "review" ? "on" : ""} onClick={() => setTab("review")} title="Review comments">
               Review{design.comments.some((c) => !c.resolved) ? ` ${design.comments.filter((c) => !c.resolved).length}` : ""}
             </button>
@@ -265,6 +269,11 @@ export function Editor({ projectId }: { projectId: string }) {
           {tab === "bom" && <BomPanel />}
           {tab === "review" && <ReviewPanel />}
           {tab === "history" && <HistoryPanel />}
+          {tab === "analysis" && (
+            <Suspense fallback={<Loading />}>
+              <Analysis />
+            </Suspense>
+          )}
           {tab === "sim" && (
             <Suspense fallback={<Loading />}>
               <Simulation />

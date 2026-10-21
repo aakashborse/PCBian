@@ -1,6 +1,10 @@
 // Copilot tools. Each tool validates its input with zod and edits the shared Yjs
 // document through @pcbian/core, so AI edits behave exactly like human edits.
 import {
+  signalIntegrity,
+  irDrop,
+  decouplingCheck,
+  thermalAnalysis,
   fieldSolveImpedance,
   fieldWidthForImpedance,
   addChannels,
@@ -721,6 +725,56 @@ export const TOOLS = {
       return { ref: c.ref, pins: getPart(sheetPartId(child))!.symbol.pins.map((p) => p.id) };
     },
     label: ({ child_sheet }) => `Sheet symbol for ${child_sheet}`,
+  }),
+  signal_integrity: tool({
+    description:
+      "Signal-integrity review of the routed board: per net the impedance along the route vs its net-class/diff-pair target, propagation delay, via count, and length routed over a gap in its reference plane; plus parallel runs of different nets with estimated backward crosstalk for the given edge rate.",
+    schema: z.object({ nets: z.array(z.string()).optional(), rise_time_ns: z.number().positive().default(1), crosstalk_limit: z.number().positive().default(0.03), field_solve: z.boolean().optional() }),
+    run: (doc, { nets, rise_time_ns, crosstalk_limit, field_solve }) => {
+      const r = signalIntegrity(getDesign(doc), { nets, riseTime: rise_time_ns, crosstalkLimit: crosstalk_limit, fieldSolve: field_solve });
+      const round = (v: number, d = 1) => Math.round(v * 10 ** d) / 10 ** d;
+      return {
+        nets: r.nets.slice(0, 60).map((n) => ({ net: n.net, length_mm: round(n.length), delay_ps: round(n.delay, 0), z: n.zMin === n.zMax ? round(n.zMin) : [round(n.zMin), round(n.zMax)], target: n.target, vias: n.vias, unreferenced_mm: round(n.unreferenced) })),
+        crosstalk: r.crosstalk.slice(0, 30).map((c) => ({ a: c.a, b: c.b, layer: c.layer, coupled_mm: round(c.coupled), gap_mm: round(c.gap, 2), next_percent: round(c.next * 100) })),
+        issues: r.issues.map((i) => i.message),
+      };
+    },
+    label: () => "Signal integrity",
+  }),
+  ir_drop: tool({
+    description:
+      "DC IR drop on a power net: its traces, vias and pours become a resistor network fed at the source part (e.g. the regulator, 'U2' or 'U2.2') and drawn by the given load currents (A per part, optionally per pin). Reports the drop and voltage at each load and traces above their IPC-2221 current capacity.",
+    schema: z.object({ net: z.string(), source: z.string(), loads: z.array(z.object({ ref: z.string(), pin: z.string().optional(), current: z.number().positive() })).min(1), temp_rise: z.number().positive().default(10) }),
+    run: (doc, { net, source, loads, temp_rise }) => {
+      const r = irDrop(getDesign(doc), net, { source, loads, tempRise: temp_rise });
+      if (!r.ok) throw new Error(r.error);
+      return {
+        nominal: r.nominal,
+        loads: r.loads.map((l) => ({ at: `${l.ref}.${l.pin}`, current: l.current, drop_mV: Math.round(l.drop * 1e4) / 10, voltage: l.voltage === null ? null : Math.round(l.voltage * 1000) / 1000 })),
+        hot_traces: r.hotTraces.map((t) => ({ id: t.id, layer: t.layer, width: t.width, current: Math.round(t.current * 100) / 100, capacity: Math.round(t.capacity * 100) / 100 })),
+        issues: r.issues.map((i) => i.message),
+      };
+    },
+    label: ({ net }) => `IR drop on ${net}`,
+  }),
+  decoupling_check: tool({
+    description: "Check that every IC power pin has a decoupling capacitor to ground nearby (default within 3 mm); lists the nearest capacitor per pin.",
+    schema: z.object({ max_distance: z.number().positive().default(3) }),
+    run: (doc, { max_distance }) => {
+      const r = decouplingCheck(getDesign(doc), max_distance);
+      return { pins: r.pins, issues: r.issues.map((i) => i.message) };
+    },
+    label: () => "Decoupling check",
+  }),
+  thermal_analysis: tool({
+    description:
+      "Steady-state board temperature: heat spreads through laminate and copper (pours, traces) and leaves by convection from both faces. Part power (W) comes from the DC simulation unless given. Reports the hottest board temperature under each part. h is the convection coefficient per face (10 still air, 25-50 with a fan).",
+    schema: z.object({ power: z.record(z.string(), z.number().nonnegative()).optional(), ambient: z.number().default(25), h: z.number().positive().default(10), limit: z.number().default(85) }),
+    run: (doc, { power, ambient, h, limit }) => {
+      const r = thermalAnalysis(getDesign(doc), { power, ambient, h, limit });
+      return { max_c: Math.round(r.max * 10) / 10, total_power_w: Math.round(r.totalPower * 1000) / 1000, parts: r.parts.slice(0, 20).map((p) => ({ ref: p.ref, power_w: Math.round(p.power * 1000) / 1000, temp_c: Math.round(p.temp * 10) / 10 })), issues: r.issues.map((i) => i.message) };
+    },
+    label: () => "Thermal analysis",
   }),
   field_solve_impedance: tool({
     description:

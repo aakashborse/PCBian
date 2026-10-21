@@ -34,3 +34,6 @@ export * from "./channels";
 export * from "./symbol-edit";
 export * from "./model3d";
 export * from "./fieldsolver";
+export * from "./si";
+export * from "./pi";
+export * from "./thermal";
