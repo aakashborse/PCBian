@@ -37,3 +37,4 @@ export * from "./fieldsolver";
 export * from "./si";
 export * from "./pi";
 export * from "./thermal";
+export * from "./panel";

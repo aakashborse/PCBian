@@ -22,6 +22,7 @@ import { SchematicCanvas } from "./SchematicCanvas";
 const Board3D = lazy(() => import("./Board3D").then((m) => ({ default: m.Board3D })));
 const Simulation = lazy(() => import("./Simulation").then((m) => ({ default: m.Simulation })));
 const Analysis = lazy(() => import("./Analysis").then((m) => ({ default: m.Analysis })));
+const PanelDialog = lazy(() => import("./PanelDialog").then((m) => ({ default: m.PanelDialog })));
 const exporters = () => import("./exporters").then((m) => m.exporters);
 const Loading = () => <div className="hint">Loading…</div>;
 
@@ -39,6 +40,7 @@ export function Editor({ projectId }: { projectId: string }) {
   const [placing, setPlacing] = useState<string | null>(null);
   const [focus, setFocus] = useState<FocusRequest | null>(null);
   const [tab, setTab] = useState<RightTab>("copilot");
+  const [dialog, setDialog] = useState<"panel" | null>(null);
   const [toastMsg, setToastMsg] = useState("");
   const [menu, setMenu] = useState(false);
   const [copilot, setCopilot] = useState<boolean | null>(null);
@@ -195,6 +197,7 @@ export function Editor({ projectId }: { projectId: string }) {
                 {(
                   [
                     ["Gerber + drill (fabrication .zip)", async () => (await exporters()).gerbers(design)],
+                    ["Panel (fabrication .zip)…", async () => setDialog("panel")],
                     ["Schematic (.pdf)", async () => (await exporters()).schematicPdf(design)],
                     ["Schematic (.svg)", async () => (await exporters()).svg(design)],
                     ["Assembly drawing (.pdf)", async () => (await exporters()).assemblyPdf(design)],
@@ -282,6 +285,11 @@ export function Editor({ projectId }: { projectId: string }) {
         </aside>
       </div>
       {toastMsg && <div className="toast">{toastMsg}</div>}
+      {dialog === "panel" && (
+        <Suspense fallback={null}>
+          <PanelDialog onClose={() => setDialog(null)} onExport={async (o) => (await exporters()).panel(design, o)} />
+        </Suspense>
+      )}
       {importReport && (
         <div className="modal-backdrop" onClick={() => setImportReport(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px, calc(100vw - 32px))" }}>

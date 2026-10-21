@@ -979,3 +979,30 @@ fieldset.plain:disabled {
   height: 8px;
   border-radius: 4px;
 }
+.panel-dialog {
+  width: min(860px, calc(100vw - 32px));
+}
+.panel-grid {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.panel-form {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 6px 8px;
+  align-items: center;
+}
+.panel-preview {
+  width: 100%;
+  max-height: 420px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+@media (max-width: 700px) {
+  .panel-grid {
+    grid-template-columns: 1fr;
+  }
+}

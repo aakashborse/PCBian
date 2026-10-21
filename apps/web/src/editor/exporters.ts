@@ -1,4 +1,4 @@
-import { assemblyPdf, bomCsv, gerberFiles, ipc2581, kicadNetlist, kicadPcb, netlistText, odbFiles, pickAndPlaceCsv, schematicPdf, schematicSvgs, stepFile, type Design } from "@pcbian/core";
+import { panelFiles, type PanelOptions, assemblyPdf, bomCsv, gerberFiles, ipc2581, kicadNetlist, kicadPcb, netlistText, odbFiles, pickAndPlaceCsv, schematicPdf, schematicSvgs, stepFile, type Design } from "@pcbian/core";
 import JSZip from "jszip";
 import { designModels } from "../lib/models";
 
@@ -47,5 +47,14 @@ export const exporters = {
     zip.file(`${named.name}-schematic.pdf`, schematicPdf(d));
     zip.file(`${named.name}-assembly.pdf`, assemblyPdf(d));
     download(`${named.name}-fabrication.zip`, await zip.generateAsync({ type: "blob" }));
+  },
+  /** Panel fabrication files: Gerbers, drills (plated and non-plated), V-score, panel placement. */
+  async panel(d: Design, opts: PanelOptions) {
+    const zip = new JSZip();
+    const named = { ...d, name: safe(d.name) };
+    const { files, panel } = panelFiles(named, opts);
+    for (const [file, body] of Object.entries(files)) zip.file(file, body);
+    zip.file(`${panel.design.name}-pos.csv`, pickAndPlaceCsv(panel.design));
+    download(`${panel.design.name}-${opts.cols}x${opts.rows}.zip`, await zip.generateAsync({ type: "blob" }));
   },
 };

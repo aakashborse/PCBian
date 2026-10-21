@@ -1,6 +1,7 @@
 // Copilot tools. Each tool validates its input with zod and edits the shared Yjs
 // document through @pcbian/core, so AI edits behave exactly like human edits.
 import {
+  panelize,
   signalIntegrity,
   irDrop,
   decouplingCheck,
@@ -725,6 +726,16 @@ export const TOOLS = {
       return { ref: c.ref, pins: getPart(sheetPartId(child))!.symbol.pins.map((p) => p.id) };
     },
     label: ({ child_sheet }) => `Sheet symbol for ${child_sheet}`,
+  }),
+  plan_panel: tool({
+    description:
+      "Lay out a fabrication panel of this board (cols x rows, routed gaps with breakaway tabs and mouse bites, or V-score; rails with fiducials and tooling holes) and report its size and features. The user downloads the panel files from Export > Panel.",
+    schema: z.object({ cols: z.number().int().min(1).max(20), rows: z.number().int().min(1).max(20), separation: z.enum(["tabs", "vscore"]).default("tabs"), gap: z.number().positive().default(2), rail: z.number().positive().default(5), rails: z.enum(["tb", "lr", "all", "none"]).default("tb") }),
+    run: (doc, i) => {
+      const p = panelize(getDesign(doc), i);
+      return { width_mm: Math.round(p.width * 100) / 100, height_mm: Math.round(p.height * 100) / 100, boards: p.boards.length, tabs: p.tabs.length, npth_holes: p.npth.length, vscore_lines: p.vscore.length, warnings: p.warnings };
+    },
+    label: ({ cols, rows }) => `Panel ${cols}x${rows}`,
   }),
   signal_integrity: tool({
     description:
