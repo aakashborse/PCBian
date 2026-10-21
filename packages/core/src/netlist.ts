@@ -19,6 +19,10 @@ export class UnionFind {
     const rb = this.find(b);
     if (ra !== rb) this.parent.set(ra, rb);
   }
+  /** Every element seen so far. */
+  keys(): IterableIterator<string> {
+    return this.parent.keys();
+  }
 }
 
 export const termKey = (t: Terminal) => `${t.comp}:${t.pin}`;

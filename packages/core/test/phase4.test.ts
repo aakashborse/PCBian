@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   addComponent,
+  addKeepout,
+  addTrace,
+  altiumQuery,
+  parseRules,
+  setDesignRules,
   analyzeCopper,
   copperGap,
   findByRef,
@@ -68,5 +73,48 @@ describe("any-angle rotation", () => {
       expect(p.world.y).toBeCloseTo(before[i].world.y, 3);
       expect(p.angle).toBeCloseTo(before[i].angle, 3);
     });
+  });
+});
+
+describe("custom design rules", () => {
+  it("parses rules, units and conditions, and reports mistakes", () => {
+    const { rules, errors } = parseRules(`
+      # comment
+      (version 1)
+      (rule "HV" (condition "A.NetClass == 'HV' && B.NetClass != 'HV'") (constraint clearance (min 60mil)))
+      (rule "Bad" (condition "A.Colour == 'red'") (constraint clearance (min 1mm)))
+      (rule "Typo" (constraint width (min 1mm)))`);
+    expect(rules.map((r) => r.name)).toEqual(["HV"]);
+    expect(rules[0].constraints[0].min).toBeCloseTo(1.524, 6);
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toMatch(/Colour/);
+  });
+
+  it("overrides clearance and edge clearance, with areas and the last rule winning", () => {
+    const doc = newDoc();
+    // Two traces of different nets 0.3mm apart; the first runs 0.1mm from the top edge.
+    addTrace(doc, { layer: "top", width: 0.2, points: [{ x: 5, y: 0.2 }, { x: 20, y: 0.2 }], net: "A" });
+    addTrace(doc, { layer: "top", width: 0.2, points: [{ x: 5, y: 0.7 }, { x: 20, y: 0.7 }], net: "B" });
+    const codes = () => runDrc(getDesign(doc)).filter((i) => i.severity === "error").map((i) => i.code).sort();
+    expect(codes()).toEqual(["edge_clearance"]);
+    addKeepout(doc, { name: "Edge strip", layers: ["top"], points: [{ x: 0, y: 0 }, { x: 30, y: 0 }, { x: 30, y: 2 }, { x: 0, y: 2 }], noTracks: false, noVias: false, noPours: false });
+    setDesignRules(doc, `(rule "Wide" (constraint clearance (min 0.5mm)))
+(rule "Strip" (condition "A.intersectsArea('Edge strip')") (constraint edge_clearance (min 0mm)))
+(rule "Pair A-B" (condition "A.NetName == 'A' && B.NetName == 'B'") (constraint clearance (min 0.25mm)))
+(rule "No vias in strip" (condition "A.insideArea('Edge strip')") (constraint disallow via))`);
+    expect(codes()).toEqual([]);
+    setDesignRules(doc, `(rule "Pair A-B" (condition "A.NetName == 'A' && B.NetName == 'B'") (constraint clearance (min 0.25mm)))
+(rule "Wide" (constraint clearance (min 0.5mm)))
+(rule "Strip" (condition "A.intersectsArea('Edge*')") (constraint edge_clearance (min 0mm)))`);
+    // "Wide" now comes last and wins; area names are not patterns, so the edge exemption is gone
+    // (and the unknown area is reported).
+    expect(codes()).toEqual(["clearance", "edge_clearance"]);
+    expect(runDrc(getDesign(doc)).some((i) => i.code === "rule_syntax" && /Edge\*/.test(i.message))).toBe(true);
+  });
+
+  it("translates Altium rule scopes", () => {
+    expect(altiumQuery("InNetClass('PWR') and not IsVia", "A", new Map([["PWR", ["VCC", "3V3"]]]))).toBe("(A.NetName == 'VCC' || A.NetName == '3V3') && ! A.Type == 'via'");
+    expect(altiumQuery("TouchesRoom('R1') or OnTopSilkscreen", "B")).toBe("B.intersectsArea('R1') || false");
+    expect(() => altiumQuery("IsDiffPair", "A")).toThrow();
   });
 });

@@ -20,6 +20,7 @@ import {
   type WorldPad,
 } from "./geometry";
 import { getPart } from "./library";
+import { compileRules, ruleConstraint, type RuleItem, type RuleSet } from "./rules";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
 import { computeZoneFill, teardrops, type Cutout, type ZoneFill } from "./zones";
 import { ALL_COPPER, type CopperLayer, type Design, type Issue, type Net, type PinType, type Trace, type Vec, type Via, type Zone } from "./types";
@@ -104,6 +105,9 @@ export interface CopperAnalysis {
   fills: Map<string, ZoneFill>;
 }
 
+/** An imported trace's or via's recorded net, the fallback for copper that reaches no pad. */
+const storedNet = (it: CopperItem) => (it.kind === "trace" ? it.trace.net : it.kind === "via" ? it.via.net : undefined);
+
 export function analyzeCopper(design: Design, nets = computeNets(design)): CopperAnalysis {
   const netOf = netByTerminal(nets);
   const items: CopperItem[] = [];
@@ -150,7 +154,7 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
     const netPre = (it: CopperItem) => {
       if (it.kind === "pad" && it.net) return it.net;
       const s = pre.get(uf.find(it.key));
-      return s && s.size === 1 ? [...s][0] : undefined;
+      return s && s.size === 1 ? [...s][0] : s?.size ? undefined : storedNet(it);
     };
     for (const z of design.zones) {
       const fill = computeZoneFill(design, z, items, netPre as (it: unknown) => string | undefined);
@@ -161,6 +165,24 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
         for (const m of members) uf.union(key, m);
         islandKeys.push({ key, net: z.net });
       });
+    }
+    // Overlapping pours of the same net on the same layer are one piece of copper.
+    const zs = design.zones;
+    for (let i = 0; i < zs.length; i++) {
+      for (let j = i + 1; j < zs.length; j++) {
+        const a = zs[i];
+        const b = zs[j];
+        if (a.net !== b.net || a.layer !== b.layer) continue;
+        const fa = fills.get(a.id)!;
+        const fb = fills.get(b.id)!;
+        if (!fb.islandAt || !fa.islandSamples || polygonPolygonDistance(a.points, b.points) > 0) continue;
+        fa.islandSamples.forEach((pts, k) => {
+          for (const p of pts) {
+            const m = fb.islandAt!(p);
+            if (m >= 0) uf.union(`zone:${a.id}:${k}`, `zone:${b.id}:${m}`);
+          }
+        });
+      }
     }
   }
 
@@ -176,7 +198,7 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
   const netOfItem = (it: CopperItem) => {
     if (it.kind === "pad" && it.net) return it.net;
     const s = clusterNets.get(clusterOf.get(it.key)!);
-    return s && s.size === 1 ? [...s][0] : undefined;
+    return s && s.size === 1 ? [...s][0] : s?.size ? undefined : storedNet(it);
   };
   return { nets, items, clusterOf, clusterNets, pairs, netOfItem, fills };
 }
@@ -250,9 +272,34 @@ export function ratsnest(design: Design, analysis = analyzeCopper(design)): RatL
 const itemLabel = (it: CopperItem) => (it.kind === "pad" ? `${it.pad.ref} pad ${it.pad.id}` : it.kind === "trace" ? `trace on ${it.trace.layer}` : "via");
 const itemPos = (it: CopperItem): Vec => (it.kind === "pad" ? it.pad.world : it.kind === "via" ? it.via : it.trace.points[0]);
 
+/** A copper item as custom design rules see it. */
+export function ruleItemOf(design: Design, analysis: CopperAnalysis, it: CopperItem): RuleItem {
+  const net = analysis.netOfItem(it);
+  const base = { net, netClass: netRules(design, net).className };
+  if (it.kind === "trace") return { ...base, type: "track", layer: it.trace.layer, shape: { kind: "line", points: it.trace.points, width: it.trace.width } };
+  if (it.kind === "via") return { ...base, type: "via", shape: { kind: "circle", c: it.via, r: it.via.diameter / 2 } };
+  const comp = design.components.find((c) => c.id === it.pad.comp);
+  return {
+    ...base,
+    type: "pad",
+    layer: it.pad.layers.length === 1 ? it.pad.layers[0] : undefined,
+    ref: it.pad.ref,
+    pad: it.pad.id,
+    padType: it.pad.drill ? "thru" : "smd",
+    footprint: comp ? getPart(comp.partId)?.footprint?.name : undefined,
+    shape: it.pad.shape === "circle" ? { kind: "circle", c: it.pad.world, r: Math.min(it.pad.ww, it.pad.wh) / 2 } : { kind: "poly", points: padCorners(it.pad) },
+  };
+}
+
 export function runDrc(design: Design): Issue[] {
   const issues: Issue[] = [];
   const analysis = analyzeCopper(design);
+  const rs = compileRules(design);
+  for (const e of rs.errors) issues.push({ severity: "warning", code: "rule_syntax", message: e });
+  const ruleMemo = new Map<string, RuleItem>();
+  const ri = (it: CopperItem) => ruleMemo.get(it.key) ?? (ruleMemo.set(it.key, ruleItemOf(design, analysis, it)), ruleMemo.get(it.key)!);
+  const hasRules = rs.rules.length > 0;
+  const edgeMin = (it: CopperItem) => (hasRules ? ruleConstraint(rs, "edge_clearance", ri(it))?.min : undefined) ?? EDGE_CLEAR;
   const outline = boardOutline(design.board);
   const holes = design.board.cutouts ?? [];
   const insideBoard = (p: Vec) => pointInPolygon(p, outline) && !holes.some((h) => pointInPolygon(p, h));
@@ -273,11 +320,16 @@ export function runDrc(design: Design): Issue[] {
     if (g <= 1e-6 || analysis.clusterOf.get(a.key) === analysis.clusterOf.get(b.key)) continue;
     const na = analysis.netOfItem(a);
     const nb = analysis.netOfItem(b);
+    // Copper of the same net needs no clearance, even where it is not (yet) joined.
+    if (na !== undefined && na === nb) continue;
     let required = Math.max(netRules(design, na).clearance, netRules(design, nb).clearance);
     // The two traces of a differential pair run at the pair gap, which may be tighter than the clearance rule.
     const dp = pairOf(design, na);
     if (dp && dp.partner === nb && a.kind === "trace" && b.kind === "trace") required = Math.min(required, dp.pair.gap);
-    if (g < required - 1e-9) {
+    // A matching custom rule overrides the net-class clearance.
+    const rule = hasRules && g < 3 ? ruleConstraint(rs, "clearance", ri(a), ri(b)) : undefined;
+    if (rule?.min !== undefined) required = rule.min;
+    if (g < required - (rule ? 5e-4 : 1e-9)) {
       issues.push({
         severity: "error",
         code: "clearance",
@@ -331,7 +383,8 @@ export function runDrc(design: Design): Issue[] {
       issues.push({ severity: "error", code: "trace_outside", message: "Trace runs outside the board outline", at: t.points[0] });
     } else {
       const d = Math.min(...segs(t).map(([a, b]) => edgeDistance(a, b)));
-      if (d - t.width / 2 < EDGE_CLEAR - 1e-9) issues.push({ severity: "error", code: "edge_clearance", message: `Trace is ${(d - t.width / 2).toFixed(2)}mm from the board edge (minimum ${EDGE_CLEAR}mm)`, at: t.points[0] });
+      const min = it ? edgeMin(it) : EDGE_CLEAR;
+      if (d - t.width / 2 < min - 5e-4) issues.push({ severity: "error", code: "edge_clearance", message: `Trace is ${(d - t.width / 2).toFixed(2)}mm from the board edge (minimum ${min}mm)`, at: t.points[0] });
     }
     // Acid traps: acute angles between consecutive segments trap etchant.
     for (let i = 1; i < t.points.length - 1; i++) {
@@ -357,8 +410,9 @@ export function runDrc(design: Design): Issue[] {
     if (it.kind !== "pad") continue;
     const cs = padCorners(it.pad);
     const d = Math.min(...cs.map((q, i) => edgeDistance(q, cs[(i + 1) % cs.length])));
-    if (insideBoard(it.pad.world) && d < EDGE_CLEAR - 1e-9) issues.push({ severity: "warning", code: "edge_clearance", message: `${it.pad.ref} pad ${it.pad.id} is ${d.toFixed(2)}mm from the board edge`, at: it.pad.world, refs: [it.pad.ref] });
+    if (insideBoard(it.pad.world) && d < edgeMin(it) - 5e-4) issues.push({ severity: "warning", code: "edge_clearance", message: `${it.pad.ref} pad ${it.pad.id} is ${d.toFixed(2)}mm from the board edge`, at: it.pad.world, refs: [it.pad.ref] });
   }
+  if (hasRules) issues.push(...customRuleChecks(design, analysis, rs, ri));
   issues.push(...silkAndMaskChecks(design, analysis));
   issues.push(...lengthIssues(design, analysis));
   for (const v of design.vias) {
@@ -383,6 +437,37 @@ export function runDrc(design: Design): Issue[] {
 export const traceLength = (t: Pick<Trace, "points">) => t.points.slice(1).reduce((s, p, i) => s + Math.hypot(p.x - t.points[i].x, p.y - t.points[i].y), 0);
 
 /** Routed trace length per net (mm). */
+/** Per-item custom constraints: track width, via diameter, hole size and disallowed items. */
+function customRuleChecks(design: Design, analysis: CopperAnalysis, rs: RuleSet, ri: (it: CopperItem) => RuleItem): Issue[] {
+  const issues: Issue[] = [];
+  // 0.5 µm of slack absorbs unit conversions (an imported 23.622mil is 0.6mm).
+  const range = (v: number, c: { min?: number; max?: number } | undefined) => (c?.min !== undefined && v < c.min - 5e-4 ? `below ${c.min}mm` : c?.max !== undefined && v > c.max + 5e-4 ? `above ${c.max}mm` : "");
+  for (const it of analysis.items) {
+    const r = ri(it);
+    const at = itemPos(it);
+    const ban = ruleConstraint(rs, "disallow", r);
+    if (ban && (!ban.types?.length || ban.types.includes(r.type))) issues.push({ severity: "error", code: "rule_disallow", message: `${itemLabel(it)} is not allowed here (rule "${ban.rule}")`, at });
+    if (it.kind === "trace") {
+      const c = ruleConstraint(rs, "track_width", r);
+      const bad = range(it.trace.width, c);
+      if (c && bad) issues.push({ severity: "error", code: "rule_width", message: `Trace width ${it.trace.width}mm is ${bad} (rule "${c.rule}")`, at });
+    } else if (it.kind === "via") {
+      const c = ruleConstraint(rs, "via_diameter", r);
+      const bad = range(it.via.diameter, c);
+      if (c && bad) issues.push({ severity: "error", code: "rule_via", message: `Via diameter ${it.via.diameter}mm is ${bad} (rule "${c.rule}")`, at });
+    }
+    const drill = it.kind === "via" ? it.via.drill : it.kind === "pad" ? it.pad.drill : undefined;
+    if (drill) {
+      const c = ruleConstraint(rs, "hole_size", r);
+      const bad = range(drill, c);
+      if (c && bad) issues.push({ severity: "error", code: "rule_hole", message: `${itemLabel(it)} hole ${drill}mm is ${bad} (rule "${c.rule}")`, at });
+    }
+  }
+  // Pads list once per footprint pad even when they span many layers; drop repeats.
+  const seen = new Set<string>();
+  return issues.filter((i) => !seen.has(i.message + JSON.stringify(i.at)) && seen.add(i.message + JSON.stringify(i.at)));
+}
+
 export function netLengths(design: Design, analysis = analyzeCopper(design)): Map<string, number> {
   const out = new Map<string, number>();
   for (const it of analysis.items) {

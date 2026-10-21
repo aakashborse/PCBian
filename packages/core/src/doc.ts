@@ -105,6 +105,7 @@ export function getDesign(doc: Y.Doc): Design {
     lengthGroups: (m.get("lengthGroups") as LengthGroup[] | undefined) ?? [],
     comments: [...commentsMap(doc).values()].sort((a, b) => a.createdAt - b.createdAt),
     spiceModels: (m.get("spiceModels") as SpiceModel[] | undefined) ?? [],
+    rules: (m.get("rules") as string | undefined) ?? "",
     variants,
     activeVariant: v ? activeVariant : "",
   };
@@ -116,6 +117,9 @@ export const sheetOf = (design: Pick<Design, "sheets">, c: ComponentData) => c.s
 export function setName(doc: Y.Doc, name: string) {
   meta(doc).set("name", name);
 }
+
+/** Replace the custom design rules text. */
+export const setDesignRules = (doc: Y.Doc, text: string) => meta(doc).set("rules", text);
 
 export function setBoard(doc: Y.Doc, patch: Partial<BoardSettings>) {
   const m = meta(doc);
@@ -195,9 +199,9 @@ export function addTrace(doc: Y.Doc, t: Omit<Trace, "id">): Trace {
 export const deleteTrace = (doc: Y.Doc, id: string) => tracesMap(doc).delete(id);
 
 /** Add a via; `span` makes it blind/buried/micro (omit, or top-bottom, for a through via). */
-export function addVia(doc: Y.Doc, at: Vec, diameter = 0.6, drill = 0.3, span?: { from?: CopperLayer; to?: CopperLayer }): Via {
+export function addVia(doc: Y.Doc, at: Vec, diameter = 0.6, drill = 0.3, span?: { from?: CopperLayer; to?: CopperLayer; net?: string }): Via {
   const through = !span || ((!span.from || span.from === "top") && (!span.to || span.to === "bottom"));
-  const via: Via = { id: uid("v"), x: at.x, y: at.y, diameter, drill, ...(through ? {} : { from: span!.from ?? "top", to: span!.to ?? "bottom" }) };
+  const via: Via = { id: uid("v"), x: at.x, y: at.y, diameter, drill, ...(through ? {} : { from: span!.from ?? "top", to: span!.to ?? "bottom" }), ...(span?.net ? { net: span.net } : {}) };
   viasMap(doc).set(via.id, via);
   return via;
 }

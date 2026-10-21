@@ -6,7 +6,7 @@ import * as CFB from "cfb";
 import type * as Y from "yjs";
 import { importBoard, type KicadImportReport, type PcbData, type PcbFootprint } from "./kicad-import";
 import { normAngle, rotate } from "./geometry";
-import type { CopperLayer, Pad, Vec } from "./types";
+import { ALL_COPPER, type CopperLayer, type Pad, type Vec } from "./types";
 
 const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
 /** Altium internal unit = 1/10000 mil. */
@@ -130,6 +130,11 @@ function stream(cfb: CFB.CFB$Container, name: string): Uint8Array | null {
 const ALTIUM_TOP = 1;
 const ALTIUM_BOTTOM = 32;
 const ALTIUM_MULTI = 74;
+const ALTIUM_PLANE1 = 39;
+const ALTIUM_PLANE16 = 54;
+const isPlane = (l: number) => l >= ALTIUM_PLANE1 && l <= ALTIUM_PLANE16;
+/** Signal layers and internal planes. */
+const isCopper = (l: number) => (l >= ALTIUM_TOP && l <= ALTIUM_BOTTOM) || isPlane(l);
 
 function layerName(s: string): number {
   const u = s.toUpperCase();
@@ -154,6 +159,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
   const nets: string[] = [];
   const nb = stream(cfb, "Nets6");
   if (nb) for (const r = new Bin(nb); r.left > 4; ) nets.push(r.props().NAME ?? "");
+  const netField = (n: number) => (n !== NONE && nets[n] ? { net: nets[n] } : {});
 
   interface Comp {
     ref: string;
@@ -174,7 +180,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
   // Copper layers in use (mid layers 2-31, planes 39-54), in stack order.
   const usedMid = new Set<number>();
   const note = (l: number) => {
-    if (l > ALTIUM_TOP && l < ALTIUM_BOTTOM) usedMid.add(l);
+    if ((l > ALTIUM_TOP && l < ALTIUM_BOTTOM) || isPlane(l)) usedMid.add(l);
   };
 
   interface RawPad {
@@ -227,18 +233,20 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       const len = r.u32();
       const start = r.pos;
       const layer = r.u8();
-      r.skip(2);
-      r.u16(); // net (connectivity comes from the copper itself)
+      r.skip(1);
+      const keepout = r.u8() === 2;
+      const net = r.u16();
       const polygon = r.u16();
       r.skip(6);
       const a = r.pos2();
       const b = r.pos2();
       const width = r.unit();
       r.pos = start + len;
-      // Tracks that belong to a polygon are its hatch/fill primitives, rebuilt from the pour.
-      if (polygon !== NONE) continue;
+      // Tracks that belong to a polygon are its hatch/fill primitives, rebuilt from the pour;
+      // keepout tracks are restrictions, not copper.
+      if (polygon !== NONE || keepout) continue;
       note(layer);
-      if (layer >= ALTIUM_TOP && layer <= ALTIUM_BOTTOM) traces.push({ layer: layer as unknown as CopperLayer, width, points: [a, b] });
+      if (layer >= ALTIUM_TOP && layer <= ALTIUM_BOTTOM) traces.push({ layer: layer as unknown as CopperLayer, width, points: [a, b], ...netField(net) });
     }
   }
   const ab = stream(cfb, "Arcs6");
@@ -249,8 +257,9 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       const len = r.u32();
       const start = r.pos;
       const layer = r.u8();
-      r.skip(2);
-      r.u16();
+      r.skip(1);
+      const keepout = r.u8() === 2;
+      const net = r.u16();
       const polygon = r.u16();
       r.skip(6);
       const c = r.pos2();
@@ -259,7 +268,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       let ea = r.f64();
       const width = r.unit();
       r.pos = start + len;
-      if (polygon !== NONE || !(layer >= ALTIUM_TOP && layer <= ALTIUM_BOTTOM)) continue;
+      if (polygon !== NONE || keepout || !(layer >= ALTIUM_TOP && layer <= ALTIUM_BOTTOM)) continue;
       note(layer);
       if (ea < sa) ea += 360;
       const n = Math.max(2, Math.ceil((ea - sa) / 10));
@@ -267,12 +276,12 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
         const a = ((sa + ((ea - sa) * k) / n) * Math.PI) / 180;
         return { x: r4(c.x + radius * Math.cos(a)), y: r4(c.y - radius * Math.sin(a)) };
       });
-      traces.push({ layer: layer as unknown as CopperLayer, width, points: pts });
+      traces.push({ layer: layer as unknown as CopperLayer, width, points: pts, ...netField(net) });
     }
   }
   const vias: PcbData["vias"] = [];
   const vb = stream(cfb, "Vias6");
-  const rawVias: { at: Vec; dia: number; hole: number; a: number; b: number }[] = [];
+  const rawVias: { at: Vec; dia: number; hole: number; a: number; b: number; net: number }[] = [];
   if (vb) {
     const r = new Bin(vb);
     while (r.left > 1) {
@@ -280,7 +289,7 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       const len = r.u32();
       const start = r.pos;
       r.skip(3);
-      r.u16();
+      const net = r.u16();
       r.skip(2);
       r.u16();
       r.skip(4);
@@ -292,11 +301,12 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       r.pos = start + len;
       note(a);
       note(b);
-      rawVias.push({ at, dia, hole, a, b });
+      rawVias.push({ at, dia, hole, a, b, net });
     }
   }
 
   const zones: PcbData["zones"] = [];
+  const planePolys: { net: string; layer: number; points: Vec[] }[] = [];
   const polyb = stream(cfb, "Polygons6");
   if (polyb)
     for (const r = new Bin(polyb); r.left > 4; ) {
@@ -305,7 +315,12 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       const net = nets[Number(p.NET ?? NONE)];
       const pts = vertices(p);
       note(layer);
-      if (!net || pts.length < 3 || !(layer >= ALTIUM_TOP && layer <= ALTIUM_BOTTOM)) continue;
+      if (!net || pts.length < 3 || !isCopper(layer)) continue;
+      if (isPlane(layer)) {
+        // Internal planes: the largest polygon is the plane itself, the others are split islands on top of it.
+        planePolys.push({ net, layer, points: pts });
+        continue;
+      }
       const hatch = p.HATCHSTYLE && p.HATCHSTYLE !== "Solid" && p.HATCHSTYLE !== "None";
       zones.push({ net, layer: layer as unknown as CopperLayer, points: pts, ...(hatch ? { fill: "hatch" as const, hatchWidth: unit(p.TRACKWIDTH, 0.25), hatchGap: Math.max(0.2, unit(p.GRIDSIZE, 1) - unit(p.TRACKWIDTH, 0.25)) } : {}), ...(Number(p.POURINDEX) ? { priority: Math.max(0, 100 - Number(p.POURINDEX)) } : {}) });
     }
@@ -380,7 +395,12 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
   }
 
   // Map Altium layer numbers onto PCBian's stack now that the used mid layers are known.
-  const mids = [...usedMid].sort((a, b) => a - b);
+  // Inner layers in stack order, following Board6's layer chain from the top (planes interleave with
+  // mid layers); layers the chain does not reach keep their numeric order after it.
+  const chain: number[] = [];
+  for (let l = Number(boardProps.LAYER1NEXT ?? 0), guard = 0; l && l !== ALTIUM_BOTTOM && guard < 100; l = Number(boardProps[`LAYER${l}NEXT`] ?? 0), guard++) chain.push(l);
+  const rank = (l: number) => (chain.includes(l) ? chain.indexOf(l) : 1000 + l);
+  const mids = [...usedMid].sort((a, b) => rank(a) - rank(b));
   const toLayer = (l: number): CopperLayer | null => (l === ALTIUM_TOP ? "top" : l === ALTIUM_BOTTOM ? "bottom" : mids.includes(l) ? (`in${mids.indexOf(l) + 1}` as CopperLayer) : null);
   const fix = <T extends { layer: CopperLayer }>(items: T[]) => items.flatMap((t) => {
     const l = toLayer(t.layer as unknown as number);
@@ -388,7 +408,13 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
   });
   const outTraces = fix(traces);
   const outZones = fix(zones);
-  for (const v of rawVias) vias.push({ ...v.at, diameter: v.dia, drill: v.hole, from: toLayer(v.a) ?? undefined, to: toLayer(v.b) ?? undefined });
+  const area = (pts: Vec[]) => Math.abs(pts.reduce((acc, p, i) => acc + p.x * pts[(i + 1) % pts.length].y - pts[(i + 1) % pts.length].x * p.y, 0)) / 2;
+  for (const plane of new Set(planePolys.map((p) => p.layer))) {
+    const polys = planePolys.filter((p) => p.layer === plane).sort((a, b) => area(b.points) - area(a.points));
+    const layer = toLayer(plane);
+    if (layer) polys.forEach((p, i) => outZones.push({ net: p.net, layer, points: p.points, priority: i === 0 ? 0 : 1 }));
+  }
+  for (const v of rawVias) vias.push({ ...v.at, diameter: v.dia, drill: v.hole, from: toLayer(v.a) ?? undefined, to: toLayer(v.b) ?? undefined, ...netField(v.net) });
 
   // Footprints: pads are stored in board coordinates; recover the local frame from each component.
   const footprints: PcbFootprint[] = comps.map((c, i) => {
@@ -425,12 +451,31 @@ export function parsePcbDoc(data: Uint8Array, warnings: string[]): PcbData {
       nets: netMap,
     };
   });
-  const free = pads.filter((p) => p.comp === NONE).length;
-  if (free) warnings.push(`${free} free pad(s) outside components were skipped`);
+  // Free pads (not part of a component: test points, stitching and thermal pads) become copper
+  // areas on their layers, plus a via for the hole when they are drilled.
+  const allLayers = [...new Set([ALTIUM_TOP, ...mids, ALTIUM_BOTTOM].map(toLayer).filter((l): l is CopperLayer => !!l))];
+  let freeSkipped = 0;
+  let freeAreas = 0;
+  for (const p of pads.filter((q) => q.comp === NONE)) {
+    const net = p.net !== NONE ? nets[p.net] : undefined;
+    const layers = p.layer === ALTIUM_MULTI ? allLayers : [toLayer(p.layer)].filter((l): l is CopperLayer => !!l);
+    if (net && layers.length) {
+      const outline = padOutline(p.at, p.size.x, p.size.y, p.shape === 1, normAngle(-p.dir));
+      for (const layer of layers) outZones.push({ net, layer, points: outline, padConnection: "solid", priority: 1000 });
+      freeAreas++;
+    }
+    if (p.hole > 0) vias.push({ ...p.at, diameter: Math.max(p.hole + 0.1, Math.min(p.size.x, p.size.y)), drill: p.hole, ...(net ? { net } : {}) });
+    else if (!net && layers.length) freeSkipped++;
+  }
+  if (freeAreas) warnings.push(`${freeAreas} free pad(s) outside components were imported as copper areas`);
+  if (freeSkipped) warnings.push(`${freeSkipped} free copper pad(s) with no net and no hole were skipped`);
 
+  // Rooms become named rule areas and the file's rules become custom design rules.
+  const { rules, rooms } = altiumRules(cfb, warnings);
+  const keepouts: PcbData["keepouts"] = rooms.map((r) => ({ name: r.name, points: r.points, layers: [...ALL_COPPER], noTracks: false, noVias: false, noPours: false }));
   const outline = vertices(boardProps);
   const copper = 2 + mids.length;
-  return { footprints: footprints.filter((f) => f.footprint.pads.length), traces: outTraces, vias, zones: outZones, keepouts: [], outline: outline.length >= 3 ? [outline, ...cutouts] : [], thickness: 1.6, layers: Math.max(2, Math.min(32, Math.ceil(copper / 2) * 2)) };
+  return { footprints: footprints.filter((f) => f.footprint.pads.length), traces: outTraces, vias, zones: outZones, keepouts, rules, outline: outline.length >= 3 ? [outline, ...cutouts] : [], thickness: 1.6, layers: Math.max(2, Math.min(32, Math.ceil(copper / 2) * 2)) };
 }
 
 /** Import an Altium .PcbDoc (board, components, copper, pours, outline). */
@@ -438,4 +483,169 @@ export function importAltiumPcb(doc: Y.Doc, data: Uint8Array): KicadImportReport
   const warnings: string[] = [];
   const pcb = parsePcbDoc(data, warnings);
   return importBoard(doc, pcb, warnings, undefined, "Altium");
+}
+
+// ---------- design rules ----------
+
+/** Translate an Altium query (rule scope) into a rule condition about item A or B; throws on unsupported terms. */
+export function altiumQuery(q: string, obj: "A" | "B", netClasses: Map<string, string[]> = new Map()): string {
+  const toks = q.match(/'[^']*'|[A-Za-z_]\w*|[()]|,|\S/g) ?? [];
+  let i = 0;
+  const arg = () => {
+    if (toks[i] !== "(") throw new Error(`${toks[i - 1]} needs an argument`);
+    const a = (toks[i + 1] ?? "").replace(/^'|'$/g, "");
+    i += 3;
+    return a.replace(/'/g, "");
+  };
+  const out: string[] = [];
+  while (i < toks.length) {
+    const t = toks[i++];
+    const l = t.toLowerCase();
+    if (t === "(" || t === ")") out.push(t);
+    else if (l === "and") out.push("&&");
+    else if (l === "or") out.push("||");
+    else if (l === "not") out.push("!");
+    else if (l === "all" || l === "true") out.push("true");
+    else if (l === "false") out.push("false");
+    else if (l === "innet") out.push(`${obj}.NetName == '${arg()}'`);
+    else if (l === "innetclass") {
+      // Altium nets may sit in several classes, so expand the class into its member nets.
+      const members = netClasses.get(arg()) ?? [];
+      out.push(members.length ? `(${members.map((n) => `${obj}.NetName == '${n.replace(/'/g, "")}'`).join(" || ")})` : "false");
+    }
+    else if (l === "incomponent") out.push(`${obj}.Reference == '${arg()}'`);
+    else if (l === "hasfootprint" || l === "infootprint") out.push(`${obj}.Footprint == '${arg()}'`);
+    else if (l === "withinroom") out.push(`${obj}.insideArea('${arg()}')`);
+    else if (l === "touchesroom") out.push(`${obj}.intersectsArea('${arg()}')`);
+    else if (l === "ispad") out.push(`${obj}.Type == 'pad'`);
+    else if (l === "isvia") out.push(`${obj}.Type == 'via'`);
+    else if (l === "istrack" || l === "isarc") out.push(`${obj}.Type == 'track'`);
+    else if (l === "ontoplayer") out.push(`${obj}.Layer == 'top'`);
+    else if (l === "onbottomlayer") out.push(`${obj}.Layer == 'bottom'`);
+    // Pours, regions, silkscreen and plated-hole terms never match the copper the DRC checks here.
+    else if (/^(isregion|ispolygon|inpoly|inpolygon|isfill|ontopsilkscreen|onbottomsilkscreen|ontopoverlay|onbottomoverlay|ismechanical)$/.test(l)) out.push("false");
+    else throw new Error(`unsupported query term ${t}`);
+  }
+  return out.join(" ");
+}
+
+function altiumRules(cfb: CFB.CFB$Container, warnings: string[]): { rules: string; rooms: { name: string; points: Vec[] }[] } {
+  const rb = stream(cfb, "Rules6");
+  const rooms: { name: string; points: Vec[] }[] = [];
+  if (!rb) return { rules: "", rooms };
+  const netClasses = new Map<string, string[]>();
+  const cl = stream(cfb, "Classes6");
+  if (cl) {
+    for (const r = new Bin(cl); r.left > 4; ) {
+      const p = r.props();
+      if (p.KIND !== "0" || !p.NAME) continue;
+      const names: string[] = [];
+      for (let i = 0; p[`M${i}`] !== undefined; i++) names.push(p[`M${i}`]);
+      netClasses.set(p.NAME, names);
+    }
+  }
+  const all: Record<string, string>[] = [];
+  for (const r = new Bin(rb); r.left > 6; ) {
+    r.skip(2);
+    all.push(r.props());
+  }
+  const lines: { pri: number; text: string }[] = [];
+  let skipped = 0;
+  for (const p of all) {
+    if (p.ENABLED === "FALSE") continue;
+    const kind = p.RULEKIND ?? "";
+    const name = (p.NAME ?? kind).replace(/"/g, "'");
+    if (kind === "RoomDefinition") {
+      const pts = vertices(p);
+      if (pts.length >= 3) rooms.push({ name: p.NAME ?? `Room${rooms.length + 1}`, points: pts });
+      continue;
+    }
+    const map: Record<string, () => string | null> = {
+      Clearance: () => `(constraint clearance (min ${mm(p.GENERICCLEARANCE ?? p.GAP)}))`,
+      BoardOutlineClearance: () => `(constraint edge_clearance (min ${mm(p.GENERICCLEARANCE ?? p.GAP)}))`,
+      Width: () => (p.MINLIMIT || p.MAXLIMIT ? `(constraint track_width${p.MINLIMIT ? ` (min ${mm(p.MINLIMIT)})` : ""}${p.MAXLIMIT ? ` (max ${mm(p.MAXLIMIT)})` : ""})` : null),
+      RoutingVias: () => (p.MINWIDTH ? `(constraint via_diameter (min ${mm(p.MINWIDTH)}))` : null),
+      HoleSize: () => (p.MINLIMIT || p.MAXLIMIT ? `(constraint hole_size${p.MINLIMIT ? ` (min ${mm(p.MINLIMIT)})` : ""}${p.MAXLIMIT ? ` (max ${mm(p.MAXLIMIT)})` : ""})` : null),
+    };
+    const make = map[kind];
+    if (!make) continue;
+    try {
+      const constraint = make();
+      if (!constraint) continue;
+      const pair = kind === "Clearance";
+      const a = altiumQuery(p.SCOPE1EXPRESSION ?? "All", "A", netClasses);
+      const b = pair ? altiumQuery(p.SCOPE2EXPRESSION ?? "All", "B", netClasses) : "true";
+      const cond = [a, b].filter((x) => x !== "true").map((x) => `(${x})`).join(" && ");
+      const pri = Number(p.PRIORITY ?? 1);
+      lines.push({ pri, text: `(rule "${name}"${cond ? ` (condition "${cond}")` : ""} ${constraint})` });
+      // Per-object-type clearances (e.g. track-to-track tighter than the generic value) refine the rule.
+      if (pair && p.OBJECTCLEARANCES) {
+        const generic = unit(p.GENERICCLEARANCE ?? p.GAP);
+        for (const entry of p.OBJECTCLEARANCES.split(";")) {
+          const m = entry.trim().match(/^ClearanceObj_(\w+)-ClearanceObj_(\w+):(\d+)$/);
+          const ta = m && OBJ_TYPE[m[1]];
+          const tb = m && OBJ_TYPE[m[2]];
+          if (!m || !ta || !tb) continue;
+          const v = Number(m[3]) * IU;
+          if (Math.abs(v - generic) < 1e-6) continue;
+          const types = `(A.${ta} && B.${tb})`;
+          lines.push({ pri, text: `(rule "${name} ${m[1]}-${m[2]}" (condition "${cond ? `${cond} && ` : ""}${types}") (constraint clearance (min ${Math.round(v * 10000) / 10000}mm)))` });
+        }
+      }
+    } catch {
+      skipped++;
+    }
+  }
+  // Altium checks only objects inside some rule's scope; mirror that for every imported kind
+  // that has no unscoped rule, so PCBian's own defaults do not apply there.
+  for (const kind of ["clearance", "edge_clearance", "track_width", "via_diameter", "hole_size"]) {
+    const of = lines.filter((l) => l.text.includes(`(constraint ${kind} `));
+    if (of.length && !of.some((l) => !l.text.includes("(condition"))) lines.push({ pri: Infinity, text: `(rule "Outside Altium ${kind} scopes" (constraint ${kind}${kind.endsWith("clearance") ? " (min 0mm)" : ""}))` });
+  }
+  if (skipped) warnings.push(`${skipped} Altium design rule(s) use query terms PCBian does not support and were skipped`);
+  // Altium priority 1 is the strongest; PCBian lets later rules win, so the strongest goes last.
+  lines.sort((x, y) => y.pri - x.pri);
+  const rules = lines.length ? `# Imported from Altium (strongest rule last)\n${lines.map((l) => l.text).join("\n")}\n` : "";
+  return { rules, rooms };
+}
+
+/** Altium clearance object kinds as rule-condition tests on one item (pours and holes are not paired here). */
+const OBJ_TYPE: Record<string, string> = {
+  Track: "Type == 'track'",
+  Arc: "Type == 'track'",
+  Via: "Type == 'via'",
+  SMDPad: "PadType == 'smd'",
+  THPad: "PadType == 'thru'",
+};
+
+const mm = (v: string | undefined) => `${Math.round(unit(v) * 10000) / 10000}mm`;
+
+/** Outline of a pad (rectangle, or a round/oblong pad as a polygon) centred at `at`, turned by `angle`. */
+function padOutline(at: Vec, w: number, h: number, round: boolean, angle: number): Vec[] {
+  const local: Vec[] = [];
+  if (!round) local.push({ x: -w / 2, y: -h / 2 }, { x: w / 2, y: -h / 2 }, { x: w / 2, y: h / 2 }, { x: -w / 2, y: h / 2 });
+  else {
+    // Stadium: two semicircles joined along the long side (a circle when w == h).
+    const r = Math.min(w, h) / 2;
+    const dx = w / 2 - r;
+    const dy = h / 2 - r;
+    const n = 12;
+    const arc = (cx: number, cy: number, a0: number) => {
+      for (let k = 0; k <= n; k++) {
+        const a = a0 + (Math.PI * k) / n;
+        local.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+      }
+    };
+    if (w >= h) {
+      arc(dx, 0, -Math.PI / 2);
+      arc(-dx, 0, Math.PI / 2);
+    } else {
+      arc(0, dy, 0);
+      arc(0, -dy, Math.PI);
+    }
+  }
+  return local.map((q) => {
+    const v = rotate(q, angle);
+    return { x: r4(at.x + v.x), y: r4(at.y + v.y) };
+  });
 }

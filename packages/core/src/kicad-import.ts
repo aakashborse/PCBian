@@ -1,7 +1,7 @@
 // Import KiCad 6/7/8 projects: schematics (.kicad_sch, multi-sheet/hierarchical) and boards (.kicad_pcb).
 // Connectivity is resolved from KiCad geometry, then rebuilt in PCBian as pin-to-pin wires and labels.
 import type * as Y from "yjs";
-import { addComponent, addCustomPart, addKeepout, addSchGraphic, addSheet, addTrace, addVia, addWire, addZone, componentsMap, getDesign, renameSheet, setBoard, setBoardOutline, sheetPartId, updateComponent } from "./doc";
+import { addComponent, addCustomPart, addKeepout, addSchGraphic, addSheet, addTrace, addVia, addWire, addZone, componentsMap, getDesign, renameSheet, setBoard, setBoardOutline, setDesignRules, sheetPartId, updateComponent } from "./doc";
 import { copperLayers, fromKicadLayerName } from "./stackup";
 import { analyzeCopper } from "./copper";
 import { attachNet } from "./edit";
@@ -135,10 +135,12 @@ function parsePcbFootprint(f: SExpr[], warnings: string[]): PcbFootprint | null 
 
 export interface PcbData {
   footprints: PcbFootprint[];
-  traces: { layer: CopperLayer; width: number; points: Vec[] }[];
-  vias: { x: number; y: number; diameter: number; drill: number; from?: CopperLayer; to?: CopperLayer }[];
+  traces: { layer: CopperLayer; width: number; points: Vec[]; net?: string }[];
+  vias: { x: number; y: number; diameter: number; drill: number; from?: CopperLayer; to?: CopperLayer; net?: string }[];
   zones: ({ net: string; layer: CopperLayer; points: Vec[] } & ReturnType<typeof zoneStyle>)[];
-  keepouts: { layers: CopperLayer[]; points: Vec[]; noTracks: boolean; noVias: boolean; noPours: boolean }[];
+  keepouts: { layers: CopperLayer[]; points: Vec[]; noTracks: boolean; noVias: boolean; noPours: boolean; name?: string }[];
+  /** Design rules carried by the source file, in PCBian's rule language. */
+  rules?: string;
   outline: Vec[][];
   thickness: number;
   layers: number;
@@ -170,21 +172,28 @@ function parsePcb(text: string, warnings: string[]): PcbData {
     const p = parsePcbFootprint(f, warnings);
     if (p) footprints.push(p);
   }
+  // Track and via nets: "(net 3)" against the board's net table, or "(net "GND")" in newer files.
+  const netNames = new Map(kids(root, "net").map((n) => [String(n[1]), String(n[2] ?? "")]));
+  const netField = (x: SExpr[]) => {
+    const n = kid(x, "net")?.[1];
+    const name = n === undefined ? "" : netNames.get(String(n)) ?? String(n);
+    return name && !/^\d+$/.test(name) ? { net: name } : {};
+  };
   const traces: PcbData["traces"] = [];
   for (const s of kids(root, "segment")) {
     const layer = fromKicadLayerName(String(kid(s, "layer")?.[1] ?? ""));
     if (!layer) continue;
-    traces.push({ layer, width: num(kid(s, "width"), 1, 0.25), points: [{ x: num(kid(s, "start"), 1), y: num(kid(s, "start"), 2) }, { x: num(kid(s, "end"), 1), y: num(kid(s, "end"), 2) }] });
+    traces.push({ layer, width: num(kid(s, "width"), 1, 0.25), points: [{ x: num(kid(s, "start"), 1), y: num(kid(s, "start"), 2) }, { x: num(kid(s, "end"), 1), y: num(kid(s, "end"), 2) }], ...netField(s) });
   }
   for (const s of kids(root, "arc")) {
     const layer = fromKicadLayerName(String(kid(s, "layer")?.[1] ?? ""));
     if (!layer) continue;
-    traces.push({ layer, width: num(kid(s, "width"), 1, 0.25), points: ["start", "mid", "end"].map((k) => ({ x: num(kid(s, k), 1), y: num(kid(s, k), 2) })) });
+    traces.push({ layer, width: num(kid(s, "width"), 1, 0.25), points: ["start", "mid", "end"].map((k) => ({ x: num(kid(s, k), 1), y: num(kid(s, k), 2) })), ...netField(s) });
   }
   // Blind/buried/micro vias keep their layer span.
   const vias = kids(root, "via").map((v) => {
     const ls = (kid(v, "layers") ?? []).slice(1).map((x) => fromKicadLayerName(String(x)) ?? undefined);
-    return { x: num(kid(v, "at"), 1), y: num(kid(v, "at"), 2), diameter: num(kid(v, "size"), 1, 0.6), drill: num(kid(v, "drill"), 1, 0.3), from: ls[0], to: ls[1] };
+    return { x: num(kid(v, "at"), 1), y: num(kid(v, "at"), 2), diameter: num(kid(v, "size"), 1, 0.6), drill: num(kid(v, "drill"), 1, 0.3), from: ls[0], to: ls[1], ...netField(v) };
   });
   const zones: PcbData["zones"] = [];
   const keepouts: PcbData["keepouts"] = [];
@@ -451,8 +460,8 @@ export function importBoard(doc: Y.Doc, pcb: PcbData | null, warnings: string[],
       setBoard(doc, { width: Math.ceil(Math.max(...pts.map((p) => p.x)) + 4), height: Math.ceil(Math.max(...pts.map((p) => p.y)) + 4) });
       warnings.push("No Edge.Cuts outline found; the board size was estimated from the parts");
     }
-    for (const t of b.traces) addTrace(doc, { layer: t.layer, width: t.width, points: t.points.map(sh) });
-    for (const v of b.vias) addVia(doc, sh(v), v.diameter, v.drill, { from: v.from, to: v.to });
+    for (const t of b.traces) addTrace(doc, { layer: t.layer, width: t.width, points: t.points.map(sh), ...(t.net ? { net: t.net } : {}) });
+    for (const v of b.vias) addVia(doc, sh(v), v.diameter, v.drill, { from: v.from, to: v.to, net: v.net });
     // Zone nets: map KiCad net names to PCBian nets through the pads KiCad assigned to them.
     const d = getDesign(doc);
     const ourNet = netByTerminal(computeNets(d));
@@ -478,12 +487,13 @@ export function importBoard(doc: Y.Doc, pcb: PcbData | null, warnings: string[],
       const layers = k.layers.filter((l) => layersNow.includes(l));
       if (layers.length) addKeepout(doc, { ...k, layers, points: k.points.map(sh) });
     }
+    if (b.rules) setDesignRules(doc, b.rules);
     // KiCad keeps design rules in the .kicad_pro file; adopt the clearance the board actually uses.
     const used = minClearance(getDesign(doc));
     if (used < getDesign(doc).board.clearance) {
       const c = Math.max(0.05, Math.floor(used * 1000) / 1000);
       setBoard(doc, { clearance: c, defaultTraceWidth: Math.min(0.25, Math.min(...b.traces.map((t) => t.width), 0.25)) });
-      warnings.push(`Board clearance set to ${c}mm to match the imported layout (design rules are not part of the imported files)`);
+      warnings.push(b.rules ? `Board clearance set to ${c}mm to match the imported layout; the file's own rules were imported as custom design rules` : `Board clearance set to ${c}mm to match the imported layout (design rules are not part of the imported files)`);
     }
     report.traces = b.traces.length;
     report.vias = b.vias.length;

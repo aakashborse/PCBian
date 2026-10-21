@@ -75,6 +75,8 @@ import {
   gerberFiles,
   getDesign,
   getPart,
+  compileRules,
+  setDesignRules,
   normAngle,
   renameSheet,
   resolveTerminal,
@@ -323,6 +325,27 @@ export const TOOLS = {
       return getDesign(doc).board;
     },
     label: () => "Update board settings",
+  }),
+  set_design_rules: tool({
+    description:
+      'Replace the custom design rules (KiCad-style text checked by the DRC; later rules win; empty string clears them). Form: (rule "name" (condition "<expr>") (constraint <kind> (min 0.2mm) (max 1mm))). Kinds: clearance, edge_clearance, track_width, via_diameter, hole_size, disallow <track|via|pad>. Conditions use A./B. with Type (track|via|pad), PadType (smd|thru), NetName, NetClass, Layer, Reference, Footprint, Pad; == and != take * ? wildcards; combine with && || !; A.insideArea(\'name\') / A.intersectsArea(\'name\') test named keepouts. Read the current rules first with get_design_rules and keep the ones you are not changing.',
+    schema: z.object({ text: z.string() }),
+    run: (doc, { text }) => {
+      const { rules, errors } = compileRules({ rules: text, keepouts: getDesign(doc).keepouts });
+      if (errors.length) throw new Error(`Rules not applied: ${errors.join("; ")}`);
+      setDesignRules(doc, text);
+      return `${rules.length} rule(s) active`;
+    },
+    label: () => "Set custom design rules",
+  }),
+  get_design_rules: tool({
+    description: "Read the custom design rules text and the named rule areas.",
+    schema: z.object({}),
+    run: (doc) => {
+      const d = getDesign(doc);
+      return { rules: d.rules || "(none)", areas: d.keepouts.filter((k) => k.name).map((k) => k.name) };
+    },
+    label: () => "Read design rules",
   }),
   set_net_class: tool({
     description:
@@ -673,9 +696,9 @@ export const TOOLS = {
 
   // ----- keepouts, variants -----
   add_keepout: tool({
-    description: "Add a keepout area (mm polygon) that forbids tracks, vias and/or copper pours on the given layers, e.g. under an antenna or around a mounting screw head.",
-    schema: z.object({ outline: z.array(point).min(3), layers: z.array(layer).min(1), no_tracks: z.boolean().default(true), no_vias: z.boolean().default(true), no_pours: z.boolean().default(true) }),
-    run: (doc, i) => addKeepout(doc, { points: i.outline, layers: i.layers, noTracks: i.no_tracks, noVias: i.no_vias, noPours: i.no_pours }).id,
+    description: "Add a keepout area (mm polygon) that forbids tracks, vias and/or copper pours on the given layers, e.g. under an antenna or around a mounting screw head. Give it a name to make it a rule area that custom design rules can refer to (set all no_* flags false for a pure rule area).",
+    schema: z.object({ outline: z.array(point).min(3), layers: z.array(layer).min(1), no_tracks: z.boolean().default(true), no_vias: z.boolean().default(true), no_pours: z.boolean().default(true), name: z.string().optional() }),
+    run: (doc, i) => addKeepout(doc, { points: i.outline, layers: i.layers, noTracks: i.no_tracks, noVias: i.no_vias, noPours: i.no_pours, ...(i.name ? { name: i.name } : {}) }).id,
     label: () => "Add keepout",
   }),
   delete_keepouts: tool({

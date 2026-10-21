@@ -55,7 +55,7 @@ export const api = {
   importKicad: (name: string, schematics: { name: string; text: string }[], pcb?: string) =>
     call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, schematics, pcb }),
   importEagle: (name: string, eagle: { schematic?: string; board?: string }) => call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, eagle }),
-  importAltium: (name: string, base64: string) => call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, altium: base64 }),
+  importAltium: (name: string, altium: { pcb?: string; schematics: { name: string; data: string }[] }) => call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, altium }),
   rename: (id: string, name: string) => call<ProjectMeta>("PATCH", `/api/projects/${id}`, { name }),
   remove: (id: string) => call<void>("DELETE", `/api/projects/${id}`),
   ask: (id: string, message: string, author: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot`, { message, author }),

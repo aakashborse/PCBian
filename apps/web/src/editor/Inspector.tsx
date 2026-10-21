@@ -236,7 +236,11 @@ export function Inspector() {
     const save = (patch: Partial<Keepout>) => keepoutsMap(doc).set(k.id, { ...k, ...patch });
     return (
       <div className="panel-body">
-        <h4>Keepout</h4>
+        <h4>{k.name ? "Rule area" : "Keepout"}</h4>
+        <div className="field">
+          <label>Name (custom design rules refer to it)</label>
+          <input value={k.name ?? ""} placeholder="e.g. HV zone" onChange={(e) => save({ name: e.target.value || undefined })} />
+        </div>
         <div className="field">
           <label>Layers</label>
           <div className="row" style={{ flexWrap: "wrap" }}>

@@ -23,6 +23,10 @@ export interface ZoneFill {
   removed: Rect[];
   /** For each surviving island, the keys of same-net items it connects. */
   islands: string[][];
+  /** For each surviving island, a sample of points inside it (for joining overlapping same-net pours). */
+  islandSamples?: Vec[][];
+  /** Index into `islands` of the island covering a point, or -1. */
+  islandAt?: (p: Vec) => number;
   /** Hatched fill: square holes of side `gap` on a (width + gap) pitch, axis-aligned from the zone's bbox origin. */
   hatch?: { width: number; gap: number; origin: Vec };
   /** Solid copper kept around same-net pads/vias in hatched fills so they always join the mesh. */
@@ -192,13 +196,26 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
   }
   const removeIslands = zone.removeIslands ?? true;
   const islands: string[][] = [];
+  const islandSamples: Vec[][] = [];
+  const kept = new Map<number, number>();
   const removedCells: number[] = [];
-  for (const cells of islandsCells) {
+  islandsCells.forEach((cells, id) => {
     const members = new Set<string>();
     for (const c of cells) if (owner[c] >= 0) members.add(same[owner[c]].key);
-    if (members.size || !removeIslands) islands.push([...members]);
-    else for (const c of cells) removedCells.push(c);
-  }
+    if (members.size || !removeIslands) {
+      kept.set(id, islands.length);
+      islands.push([...members]);
+      const step = Math.max(1, Math.floor(cells.length / 400));
+      islandSamples.push(cells.filter((_, i) => i % step === 0).map((c) => ({ x: cx(c % nx), y: cy(Math.floor(c / nx)) })));
+    } else for (const c of cells) removedCells.push(c);
+  });
+  const islandAt = (p: Vec) => {
+    const i = Math.round((p.x - bx0) / res);
+    const j = Math.round((p.y - by0) / res);
+    if (i < 0 || j < 0 || i >= nx || j >= ny) return -1;
+    const l = label[j * nx + i];
+    return l >= 0 ? (kept.get(l) ?? -1) : -1;
+  };
   let hatch: ZoneFill["hatch"];
   const halos: Cutout[] = [];
   if (zone.fill === "hatch") {
@@ -212,7 +229,7 @@ export function computeZoneFill(design: Design, zone: Zone, items: FillItem[], n
       } else if (it.kind === "via") halos.push({ kind: "circle", c: it.via, r: it.via.diameter / 2 + width });
     }
   }
-  return { zone, cutouts, spokes, clip: foreign, removed: cellsToRects(removedCells, nx, res, bx0, by0), islands, hatch, halos };
+  return { zone, cutouts, spokes, clip: foreign, removed: cellsToRects(removedCells, nx, res, bx0, by0), islands, islandSamples, islandAt, hatch, halos };
 }
 
 /** Merge raster cells into rectangles (row runs, then stacked identical runs). */

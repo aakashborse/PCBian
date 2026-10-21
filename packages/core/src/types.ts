@@ -176,6 +176,8 @@ export interface Keepout {
   noTracks: boolean;
   noVias: boolean;
   noPours: boolean;
+  /** Named rule area (custom design rules refer to it); restrictions may all be off. */
+  name?: string;
 }
 
 export interface Variant {
@@ -261,6 +263,8 @@ export interface Trace {
   layer: CopperLayer;
   width: number;
   points: Vec[];
+  /** Net recorded by an importer; used only when the copper itself reaches no pad. */
+  net?: string;
 }
 
 export interface Via {
@@ -272,6 +276,8 @@ export interface Via {
   /** Layer span for blind/buried/micro vias; omitted = through (top to bottom). */
   from?: CopperLayer;
   to?: CopperLayer;
+  /** Net recorded by an importer (e.g. stitching vias); used only when the copper itself reaches no pad. */
+  net?: string;
 }
 
 /** Dielectric between two adjacent copper layers. */
@@ -362,6 +368,8 @@ export interface Design {
   variants: Variant[];
   /** Active variant name; "" means the base design. */
   activeVariant: string;
+  /** Custom design rules (see rules.ts), checked by the DRC. */
+  rules?: string;
 }
 
 export interface Net {

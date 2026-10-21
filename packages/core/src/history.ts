@@ -58,6 +58,7 @@ export function designDiff(a: Design, b: Design): DesignDiff {
   const rules: string[] = [];
   if (json(a.netClasses) !== json(b.netClasses)) rules.push("net classes");
   if (json(a.diffPairs) !== json(b.diffPairs)) rules.push("differential pairs");
+  if ((a.rules ?? "") !== (b.rules ?? "")) rules.push("custom design rules");
   if (json(a.lengthGroups) !== json(b.lengthGroups)) rules.push("length groups");
   if (json(a.keepouts) !== json(b.keepouts)) rules.push("keepouts");
   if (json(a.variants) !== json(b.variants) || a.activeVariant !== b.activeVariant) rules.push("variants");

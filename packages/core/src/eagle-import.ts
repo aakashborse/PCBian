@@ -2,10 +2,10 @@
 // Boards become the same intermediate board data the KiCad importer uses; schematics are
 // connected by Eagle's explicit nets and redrawn as wires (plus labels for named nets).
 import type * as Y from "yjs";
-import { addComponent, addSheet, addWire, componentsMap, getDesign, updateComponent } from "./doc";
-import { attachNet, isPowerName, type LabelScope } from "./edit";
+import { addComponent, addSheet, componentsMap, getDesign, updateComponent } from "./doc";
+import { drawImportedNets } from "./netdraw";
 import { importBoard, type ImportCtx, type KicadImportReport, type PcbData, type PcbFootprint } from "./kicad-import";
-import { normAngle, rotate, schematicPin } from "./geometry";
+import { normAngle, rotate } from "./geometry";
 import type { CopperLayer, Footprint, Pad, PartSymbol, PinSide, Rotation, Shape, SymbolPin, Terminal, Vec } from "./types";
 import { parseXml, xkid, xkids, xpath, type XmlNode } from "./xml";
 
@@ -357,38 +357,7 @@ function importEagleSchematic(ctx: ImportCtx, text: string) {
       }
     }
   });
-  let nets = 0;
-  for (const [name, bySheet] of netSheets) {
-    const auto = /^N\$\d+$/.test(name);
-    const multi = bySheet.size > 1;
-    for (const terms of bySheet.values()) {
-      if (!terms.length) continue;
-      nets++;
-      // Minimum spanning tree of the net's pins on this sheet, redrawn as wires.
-      const pos = (t: Terminal) => schematicPin(componentsMap(doc).get(t.comp)!, t.pin) ?? { x: 0, y: 0 };
-      const inTree = [terms[0]];
-      const rest = terms.slice(1);
-      while (rest.length) {
-        let best = { i: 0, j: 0, d: Infinity };
-        inTree.forEach((a, i) =>
-          rest.forEach((b, j) => {
-            const pa = pos(a);
-            const pb = pos(b);
-            const d = Math.abs(pa.x - pb.x) + Math.abs(pa.y - pb.y);
-            if (d < best.d) best = { i, j, d };
-          }),
-        );
-        const b = rest.splice(best.j, 1)[0];
-        if (!(inTree[best.i].comp === b.comp && inTree[best.i].pin === b.pin)) addWire(doc, inTree[best.i], b);
-        inTree.push(b);
-      }
-      if (!auto || multi) {
-        const t = terms[0];
-        const scope: LabelScope = isPowerName(name) ? "power" : multi ? "global" : "local";
-        attachNet(doc, `${componentsMap(doc).get(t.comp)!.ref}.${t.pin}`, auto ? name.replace("$", "_") : name, scope);
-      }
-    }
-  }
+  const nets = drawImportedNets(doc, netSheets, (name) => /^N\$\d+$/.test(name), (name) => name.replace("$", "_"));
   report.nets = nets;
   for (const ref of pcbByRef.keys()) if (!compOf.has(ref)) warnings.push(`${ref} is on the board but not in the schematic; it was not imported`);
 }

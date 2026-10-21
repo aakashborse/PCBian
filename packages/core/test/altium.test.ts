@@ -1,7 +1,7 @@
 import * as CFB from "cfb";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { computeNets, findByRef, getDesign, importAltiumPcb, initDoc, netByTerminal, padsOf, ratsnest, termKey } from "../src";
+import { computeNets, findByRef, getDesign, importAltiumPcb, importAltiumProject, initDoc, netByTerminal, padsOf, ratsnest, termKey } from "../src";
 
 // Minimal writer for the Altium record formats the importer reads.
 const MIL = 10000; // internal units per mil
@@ -120,5 +120,58 @@ describe("Altium PcbDoc import", () => {
     expect(d.vias).toHaveLength(1);
     // GND is routed through the via; SIG is left unrouted.
     expect(ratsnest(d).map((r) => r.net)).toEqual([n("R1", "1")]);
+  });
+});
+
+describe("Altium schematic import", () => {
+  // Two resistors: R1.2 and R2.1 joined by a wire with a net label, R1.1 on a GND power port,
+  // and R2.2 joined to the same GND name by a port on a second sheet's power port.
+  const schdoc = (records: Record<string, string>[]) => {
+    const w = new W();
+    w.props({ HEADER: "Protel for Windows - Schematic Capture Binary File Version 5.0" });
+    for (const r of records) w.props(r);
+    const cfb = CFB.utils.cfb_new();
+    CFB.utils.cfb_add(cfb, "FileHeader", new Uint8Array(w.parts));
+    return new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]);
+  };
+  const resistor = (ref: string, x: number, y: number, index: number) => [
+    { RECORD: "1", LIBREFERENCE: "Res", "LOCATION.X": String(x), "LOCATION.Y": String(y), CURRENTPARTID: "1", PARTCOUNT: "2" },
+    { RECORD: "34", OWNERINDEX: String(index), TEXT: ref, NAME: "Designator" },
+    // Pin 1 points left from x-10, pin 2 right from x+10 (pins are 10 long): tips at x-20 and x+20.
+    { RECORD: "2", OWNERINDEX: String(index), OWNERPARTID: "1", DESIGNATOR: "1", NAME: "1", "LOCATION.X": String(x - 10), "LOCATION.Y": String(y), PINLENGTH: "10", PINCONGLOMERATE: "2", ELECTRICAL: "4" },
+    { RECORD: "2", OWNERINDEX: String(index), OWNERPARTID: "1", DESIGNATOR: "2", NAME: "2", "LOCATION.X": String(x + 10), "LOCATION.Y": String(y), PINLENGTH: "10", PINCONGLOMERATE: "0", ELECTRICAL: "4" },
+    { RECORD: "41", OWNERINDEX: String(index), NAME: "Comment", TEXT: "10k" },
+    { RECORD: "14", OWNERINDEX: String(index), OWNERPARTID: "1", "LOCATION.X": String(x - 10), "LOCATION.Y": String(y - 4), "CORNER.X": String(x + 10), "CORNER.Y": String(y + 4) },
+  ];
+
+  it("recovers parts, values and nets from wires, labels, power ports and ports", () => {
+    const sheet1 = schdoc([
+      ...resistor("R1", 100, 500, 0),
+      ...resistor("R2", 200, 500, 6),
+      { RECORD: "27", LOCATIONCOUNT: "2", X1: "120", Y1: "500", X2: "180", Y2: "500" },
+      { RECORD: "25", TEXT: "MID", "LOCATION.X": "150", "LOCATION.Y": "500" },
+      { RECORD: "27", LOCATIONCOUNT: "2", X1: "80", Y1: "500", X2: "80", Y2: "450" },
+      { RECORD: "17", TEXT: "GND", "LOCATION.X": "80", "LOCATION.Y": "450" },
+      // A port touching R2.2's tip.
+      { RECORD: "18", NAME: "RET", "LOCATION.X": "220", "LOCATION.Y": "500", WIDTH: "30", STYLE: "0" },
+    ]);
+    const sheet2 = schdoc([{ RECORD: "18", NAME: "RET", "LOCATION.X": "100", "LOCATION.Y": "100", WIDTH: "30" }, { RECORD: "17", TEXT: "GND", "LOCATION.X": "130", "LOCATION.Y": "100" }]);
+    const doc = new Y.Doc();
+    initDoc(doc, "sch");
+    const report = importAltiumProject(doc, { schematics: [{ name: "a.SchDoc", data: sheet1 }, { name: "b.SchDoc", data: sheet2 }] });
+    const d = getDesign(doc);
+    expect(d.sheets).toHaveLength(2);
+    expect(findByRef(doc, "R1")!.value).toBe("10k");
+    const nets = computeNets(d);
+    const of = netByTerminal(nets);
+    const r1 = findByRef(doc, "R1")!;
+    const r2 = findByRef(doc, "R2")!;
+    const net = (c: { id: string }, pin: string) => of.get(termKey({ comp: c.id, pin }));
+    expect(net(r1, "2")).toMatch(/^\/?MID$/); // local labels carry the sheet path
+    expect(net(r2, "1")).toBe(net(r1, "2"));
+    // R2.2 reaches GND through the RET port and sheet 2's power port.
+    expect(net(r1, "1")).toBe("GND");
+    expect(net(r2, "2")).toBe("GND");
+    expect(report.warnings.join(" ")).toMatch(/no footprint/);
   });
 });
