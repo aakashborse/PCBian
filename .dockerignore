@@ -1,0 +1,9 @@
+node_modules
+**/node_modules
+apps/web/dist
+data
+.env
+.git
+.venv
+out
+*.log

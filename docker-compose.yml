@@ -1,0 +1,39 @@
+# PCBian on any Docker host:  docker compose up -d   (then open http://<host>:8787)
+# Put secrets in a .env file next to this file (see deploy/README.md).
+services:
+  pcbian:
+    build: .
+    image: pcbian:latest
+    restart: unless-stopped
+    ports:
+      - "${PCBIAN_PORT:-8787}:8787"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      MOUSER_API_KEY: ${MOUSER_API_KEY:-}
+    volumes:
+      - pcbian-data:/data
+
+  # Nightly snapshots of /data into the pcbian-backups volume, and optionally to S3-compatible
+  # storage (AWS S3, Backblaze B2, Cloudflare R2, MinIO…) when BACKUP_S3_BUCKET is set.
+  backup:
+    image: alpine:3.20
+    restart: unless-stopped
+    depends_on: [pcbian]
+    environment:
+      BACKUP_SCHEDULE: ${BACKUP_SCHEDULE:-17 3 * * *}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-pcbian}
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+    volumes:
+      - pcbian-data:/data:ro
+      - pcbian-backups:/backups
+      - ./deploy/backup.sh:/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "apk add --no-cache rclone >/dev/null && echo \"$$BACKUP_SCHEDULE /bin/sh /backup.sh\" | crontab - && /bin/sh /backup.sh && exec crond -f -l 8"]
+
+volumes:
+  pcbian-data:
+  pcbian-backups:

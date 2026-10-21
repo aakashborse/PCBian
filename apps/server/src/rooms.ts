@@ -9,7 +9,7 @@ import type { WebSocket } from "ws";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
 import * as Y from "yjs";
-import { projectFile } from "./store.js";
+import { projectFile, writeFileAtomic } from "./store.js";
 import { noteChange } from "./versions.js";
 
 const MSG_SYNC = 0;
@@ -64,7 +64,7 @@ export class Room {
   save() {
     const file = projectFile(this.id, "ydoc");
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, Y.encodeStateAsUpdate(this.doc));
+    writeFileAtomic(file, Y.encodeStateAsUpdate(this.doc));
   }
 
   connect(ws: WebSocket) {

@@ -13,6 +13,13 @@ export interface ProjectMeta {
 
 const indexFile = () => path.join(DATA_DIR, "projects.json");
 
+/** Write a file so readers (and backups) only ever see the old or the new content. */
+export function writeFileAtomic(file: string, data: string | Uint8Array) {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+}
+
 export const projectFile = (id: string, ext: "ydoc" | "chat.json") => path.join(DATA_DIR, "projects", `${id}.${ext}`);
 
 export function listProjects(): ProjectMeta[] {
@@ -25,7 +32,7 @@ export function listProjects(): ProjectMeta[] {
 
 function writeIndex(list: ProjectMeta[]) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(indexFile(), JSON.stringify(list, null, 2));
+  writeFileAtomic(indexFile(), JSON.stringify(list, null, 2));
 }
 
 export function getProject(id: string) {

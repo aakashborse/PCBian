@@ -4,7 +4,7 @@ import path from "node:path";
 import { designDiff, designFromUpdate, getDesign, restoreInto, summarizeDiff } from "@pcbian/core";
 import * as Y from "yjs";
 import type { Room } from "./rooms.js";
-import { DATA_DIR } from "./store.js";
+import { DATA_DIR, writeFileAtomic } from "./store.js";
 
 export interface VersionMeta {
   id: string;
@@ -34,7 +34,7 @@ export function listVersions(projectId: string): VersionMeta[] {
 
 function writeIndex(projectId: string, list: VersionMeta[]) {
   fs.mkdirSync(versionsDir(projectId), { recursive: true });
-  fs.writeFileSync(indexFile(projectId), JSON.stringify(list, null, 1));
+  writeFileAtomic(indexFile(projectId), JSON.stringify(list, null, 1));
 }
 
 export function versionUpdate(projectId: string, vid: string): Uint8Array | null {
@@ -58,7 +58,7 @@ export function saveVersion(room: Room, name: string, author: string, auto = fal
   if (auto && diff?.same) return null;
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   fs.mkdirSync(versionsDir(room.id), { recursive: true });
-  fs.writeFileSync(snapFile(room.id, id), update);
+  writeFileAtomic(snapFile(room.id, id), update);
   const meta: VersionMeta = {
     id,
     name,

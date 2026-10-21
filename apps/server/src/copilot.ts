@@ -8,7 +8,7 @@ import * as Y from "yjs";
 import { z } from "zod";
 import { TOOLS, type ToolDef, type ToolName } from "./tools.js";
 import type { Room } from "./rooms.js";
-import { projectFile } from "./store.js";
+import { projectFile, writeFileAtomic } from "./store.js";
 
 const MODEL = process.env.PCBIAN_MODEL || "claude-opus-5-5";
 const MAX_TOOL_ROUNDS = 150;
@@ -88,7 +88,7 @@ function loadHistory(id: string): Anthropic.Beta.BetaMessageParam[] {
 function saveHistory(id: string) {
   const file = projectFile(id, "chat.json");
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(histories.get(id) ?? []));
+  writeFileAtomic(file, JSON.stringify(histories.get(id) ?? []));
 }
 
 export function resetCopilot(room: Room) {
