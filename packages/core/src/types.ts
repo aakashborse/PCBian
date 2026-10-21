@@ -154,8 +154,10 @@ export interface ComponentData {
   noConnect?: string[];
   /** Excluded from BOM / placement (e.g. fiducials, do-not-populate). */
   dnp?: boolean;
-  /** SPICE model name (from the design's imported models) used by the simulator. */
+  /** SPICE model or subcircuit name (from the design's imported models) used by the simulator. */
   model?: string;
+  /** For a subcircuit model: the part's pin for each subcircuit port, in port order ("3 2 8 4 1"). */
+  spicePins?: string;
   /** Manufacturer part number for this instance (overrides the library part's, e.g. per value). */
   mpn?: string;
   /** Placements of units 2..n of a multi-unit part (unit 1 uses `sch` and `sheet`). */
@@ -167,6 +169,13 @@ export interface ComponentData {
 }
 
 export type SpiceModelType = "D" | "NPN" | "PNP" | "NMOS" | "PMOS";
+
+/** A SPICE subcircuit (macromodel): its ports and body lines, as imported (continuations joined). */
+export interface SpiceSubckt {
+  name: string;
+  ports: string[];
+  lines: string[];
+}
 
 /** A primitive SPICE .model card (parameter names upper-case, values in SI units). */
 export interface SpiceModel {
@@ -417,6 +426,7 @@ export interface Design {
   lengthGroups: LengthGroup[];
   comments: DesignComment[];
   spiceModels: SpiceModel[];
+  spiceSubckts: SpiceSubckt[];
   variants: Variant[];
   /** Active variant name; "" means the base design. */
   activeVariant: string;

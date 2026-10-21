@@ -10,6 +10,7 @@ import {
   addComment,
   addSpiceModels,
   modelTypesForPart,
+  subcktInstances,
   parseSpiceModels,
   stepParam,
   sweepDC,
@@ -870,27 +871,37 @@ export const TOOLS = {
     label: ({ nets }) => `AC sweep ${nets.join(", ")}`,
   }),
   import_spice_models: tool({
-    description: "Import SPICE .model cards (diode D, NPN, PNP, NMOS, PMOS/VDMOS) from vendor model text into the design's model library. Then assign them with set_component_model.",
+    description:
+      "Import vendor SPICE models into the design's library: .model cards (diode D, NPN, PNP, NMOS, PMOS/VDMOS) and .subckt macromodels (op-amps, regulators...: R C L V I D Q M E F G H X elements, linear POLY sources; behavioural B/VALUE sources are not supported). Then assign them with set_component_model.",
     schema: z.object({ text: z.string() }),
     run: (doc, { text }) => {
       const r = parseSpiceModels(text);
-      addSpiceModels(doc, r.models);
-      return { imported: r.models.map((m) => `${m.name} (${m.type})`), warnings: r.warnings };
+      addSpiceModels(doc, r.models, r.subckts);
+      return { imported: [...r.models.map((m) => `${m.name} (${m.type})`), ...r.subckts.map((s) => `${s.name} (subcircuit: ${s.ports.join(" ")})`)], warnings: r.warnings };
     },
     label: () => "Import SPICE models",
   }),
   set_component_model: tool({
-    description: "Assign an imported SPICE model to diodes/LEDs/transistors (or clear it with an empty model to use the built-in model).",
-    schema: z.object({ refs: z.array(z.string()).min(1), model: z.string() }),
-    run: (doc, { refs, model }) =>
+    description:
+      "Assign an imported SPICE model to parts (or clear it with an empty model to use the built-in model). .model cards fit diodes/LEDs/transistors; a .subckt fits any part: give spice_pins (the part pin for each subcircuit port, in port order, e.g. '3 2 8 4 1') unless the pin count matches the ports, or the part is a dual op-amp and the subcircuit has the standard 5 op-amp ports (IN+ IN- V+ V- OUT), which then models both halves.",
+    schema: z.object({ refs: z.array(z.string()).min(1), model: z.string(), spice_pins: z.string().optional() }),
+    run: (doc, { refs, model, spice_pins }) =>
       each(refs, (ref) => {
         const c = findByRef(doc, ref);
         if (!c) throw new Error(`No component ${ref}`);
+        const d = getDesign(doc);
+        const sub = d.spiceSubckts.find((x) => x.name === model.toUpperCase());
+        if (sub) {
+          const inst = subcktInstances(getPart(c.partId)!, sub, spice_pins);
+          if (typeof inst === "string") throw new Error(`${ref}: ${inst}`);
+          updateComponent(doc, c.id, { model: sub.name, spicePins: spice_pins || undefined });
+          return `${ref}: subcircuit ${sub.name}, ${inst.map((i) => `${i.suffix ? `unit ${i.suffix} ` : ""}pins ${i.pins.join(" ")}`).join("; ")} -> ports ${sub.ports.join(" ")}`;
+        }
         const types = modelTypesForPart(c.partId);
-        const m = getDesign(doc).spiceModels.find((x) => x.name === model.toUpperCase());
+        const m = d.spiceModels.find((x) => x.name === model.toUpperCase());
         if (model && !m) throw new Error(`Model ${model} is not imported`);
         if (m && !types.includes(m.type)) throw new Error(`${ref} needs a ${types.join("/") || "non-SPICE"} model, ${m.name} is ${m.type}`);
-        updateComponent(doc, c.id, { model: model ? m!.name : undefined });
+        updateComponent(doc, c.id, { model: model ? m!.name : undefined, spicePins: undefined });
         return `${ref}: ${model || "built-in"}`;
       }),
     label: ({ refs, model }) => `Model ${model} on ${refs.join(", ")}`,

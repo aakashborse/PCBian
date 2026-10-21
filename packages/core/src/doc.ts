@@ -4,7 +4,7 @@
 import * as Y from "yjs";
 import { defaultPcbPlacement } from "./geometry";
 import { getPart, icSymbol, registerParts } from "./library";
-import { type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type CommentReply, type ComponentData, type CopperLayer, type DesignComment, type Design, type DiffPair, type LengthGroup, type NetClass, type PcbPlacement, type Placement, type Sheet, type Shape, type SpiceModel, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
+import { type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type CommentReply, type ComponentData, type CopperLayer, type DesignComment, type Design, type DiffPair, type LengthGroup, type NetClass, type PcbPlacement, type Placement, type Sheet, type Shape, type SpiceModel, type SpiceSubckt, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
 
 export const DEFAULT_BOARD: BoardSettings = { width: 50, height: 40, layers: 2, thickness: 1.6, clearance: 0.2, defaultTraceWidth: 0.25 };
 export const DEFAULT_SHEET: Sheet = { id: "main", name: "Sheet 1" };
@@ -116,6 +116,7 @@ export function getDesign(doc: Y.Doc): Design {
     lengthGroups: (m.get("lengthGroups") as LengthGroup[] | undefined) ?? [],
     comments: [...commentsMap(doc).values()].sort((a, b) => a.createdAt - b.createdAt),
     spiceModels: (m.get("spiceModels") as SpiceModel[] | undefined) ?? [],
+    spiceSubckts: (m.get("spiceSubckts") as SpiceSubckt[] | undefined) ?? [],
     rules: (m.get("rules") as string | undefined) ?? "",
     variants,
     activeVariant: v ? activeVariant : "",
@@ -322,11 +323,19 @@ export function deleteNetClass(doc: Y.Doc, name: string) {
 // ---------- SPICE models ----------
 
 /** Add or replace SPICE models by name. */
-export function addSpiceModels(doc: Y.Doc, models: SpiceModel[]) {
-  const names = new Set(models.map((m) => m.name));
-  meta(doc).set("spiceModels", [...((meta(doc).get("spiceModels") as SpiceModel[] | undefined) ?? []).filter((m) => !names.has(m.name)), ...models]);
+export function addSpiceModels(doc: Y.Doc, models: SpiceModel[], subckts: SpiceSubckt[] = []) {
+  doc.transact(() => {
+    const names = new Set(models.map((m) => m.name));
+    if (models.length) meta(doc).set("spiceModels", [...((meta(doc).get("spiceModels") as SpiceModel[] | undefined) ?? []).filter((m) => !names.has(m.name)), ...models]);
+    const subs = new Set(subckts.map((s) => s.name));
+    if (subckts.length) meta(doc).set("spiceSubckts", [...((meta(doc).get("spiceSubckts") as SpiceSubckt[] | undefined) ?? []).filter((s) => !subs.has(s.name)), ...subckts]);
+  });
 }
-export const deleteSpiceModel = (doc: Y.Doc, name: string) => meta(doc).set("spiceModels", ((meta(doc).get("spiceModels") as SpiceModel[] | undefined) ?? []).filter((m) => m.name !== name));
+export const deleteSpiceModel = (doc: Y.Doc, name: string) =>
+  doc.transact(() => {
+    meta(doc).set("spiceModels", ((meta(doc).get("spiceModels") as SpiceModel[] | undefined) ?? []).filter((m) => m.name !== name));
+    meta(doc).set("spiceSubckts", ((meta(doc).get("spiceSubckts") as SpiceSubckt[] | undefined) ?? []).filter((m) => m.name !== name));
+  });
 
 // ---------- comments ----------
 

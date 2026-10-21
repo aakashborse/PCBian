@@ -51,7 +51,7 @@ function DcView() {
   return (
     <>
       <p className="muted small" style={{ marginTop: 0 }}>
-        Live operating point. Supplies come from rail names (+5V, +3V3, VBUS…) or simulation sources. Models: R, C, L, diodes/LEDs, NPN, N-MOSFET, LM358, NE555, AMS1117.
+        Live operating point. Supplies come from rail names (+5V, +3V3, VBUS…) or simulation sources. Built-in models: R, C, L, diodes/LEDs, BJTs, MOSFETs, LM358, NE555, AMS1117; any part can use an imported SPICE subcircuit (Models tab).
       </p>
       {!r.ok ? (
         <div className="card small">{r.error}</div>
@@ -304,7 +304,7 @@ function ModelsView() {
   return (
     <>
       <p className="muted small" style={{ marginTop: 0 }}>
-        Paste SPICE <code>.model</code> cards from a vendor (diodes, NPN/PNP, NMOS/PMOS, VDMOS). Assign them to parts in the Inspector.
+        Paste vendor SPICE models: <code>.model</code> cards (diodes, NPN/PNP, NMOS/PMOS, VDMOS) and <code>.subckt</code> macromodels (op-amps, regulators… with R, C, L, V, I, D, Q, M, E, F, G, H and nested X elements, including linear POLY sources). Assign them to parts in the Inspector.
       </p>
       <textarea value={text} onChange={(e) => setText(e.target.value)} rows={6} style={{ width: "100%", fontFamily: "monospace", fontSize: 11 }} placeholder=".model 1N4148 D(IS=2.52n RS=0.568 N=1.752)" />
       <button
@@ -313,16 +313,33 @@ function ModelsView() {
         disabled={!text.trim()}
         onClick={() => {
           const r = parseSpiceModels(text);
-          addSpiceModels(conn.doc, r.models);
-          toast([r.models.length ? `Imported ${r.models.map((m) => m.name).join(", ")}` : "", ...r.warnings].filter(Boolean).join(" · "));
-          if (r.models.length) setText("");
+          addSpiceModels(conn.doc, r.models, r.subckts);
+          const names = [...r.models.map((m) => m.name), ...r.subckts.map((s) => `${s.name} (subcircuit)`)];
+          toast([names.length ? `Imported ${names.join(", ")}` : "", ...r.warnings].filter(Boolean).join(" · "));
+          if (names.length) setText("");
         }}
       >
         Import models
       </button>
-      {design.spiceModels.length === 0 && <p className="muted small">No models yet; parts use the built-in models.</p>}
+      {design.spiceModels.length === 0 && design.spiceSubckts.length === 0 && <p className="muted small">No models yet; parts use the built-in models.</p>}
       <table className="pin-table">
         <tbody>
+          {design.spiceSubckts.map((m) => (
+            <tr key={`x:${m.name}`}>
+              <td>
+                <b>{m.name}</b> <span className="muted">subcircuit</span>
+                <div className="muted small" style={{ maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.ports.join(" ")}>
+                  ports {m.ports.join(" ")} · {m.lines.length} lines
+                </div>
+              </td>
+              <td className="muted small">{users(m.name).join(", ") || "unused"}</td>
+              <td>
+                <button className="ghost small danger" onClick={() => deleteSpiceModel(conn.doc, m.name)}>
+                  ×
+                </button>
+              </td>
+            </tr>
+          ))}
           {design.spiceModels.map((m) => (
             <tr key={m.name}>
               <td>

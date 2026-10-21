@@ -21,6 +21,7 @@ import {
   busMembers,
   copperLayers,
   modelTypesForPart,
+  subcktInstances,
   layerLabel,
   traceImpedance,
   viaKind,
@@ -212,7 +213,7 @@ export function Inspector() {
             </select>
           </div>
         )}
-        {modelTypesForPart(c.partId).length > 0 && (
+        {part.kind === "part" && (modelTypesForPart(c.partId).length > 0 || design.spiceSubckts.length > 0) && (
           <div className="field">
             <label>SPICE model</label>
             <select value={c.model ?? ""} onChange={(e) => updateComponent(doc, c.id, { model: e.target.value || undefined })}>
@@ -224,9 +225,28 @@ export function Inspector() {
                     {m.name}
                   </option>
                 ))}
+              {design.spiceSubckts.map((m) => (
+                <option key={`x:${m.name}`} value={m.name}>
+                  {m.name} (subcircuit, {m.ports.length} ports)
+                </option>
+              ))}
             </select>
           </div>
         )}
+        {(() => {
+          const sub = c.model ? design.spiceSubckts.find((m) => m.name === c.model!.toUpperCase()) : undefined;
+          if (!sub) return null;
+          const inst = subcktInstances(part, sub, c.spicePins);
+          return (
+            <div className="field">
+              <label title={`Part pin for each port: ${sub.ports.join(" ")}`}>Pins → ports</label>
+              <div>
+                <input defaultValue={c.spicePins ?? ""} key={c.spicePins ?? ""} placeholder={typeof inst === "string" ? sub.ports.join(" ") : inst.map((i) => i.pins.join(" ")).join(" | ")} onBlur={(e) => e.target.value.trim() !== (c.spicePins ?? "") && updateComponent(doc, c.id, { spicePins: e.target.value.trim() || undefined })} />
+                <div className={`small ${typeof inst === "string" ? "warn-text" : "muted"}`}>{typeof inst === "string" ? inst : `ports ${sub.ports.join(" ")}${inst.length > 1 ? ` · ${inst.length} instances` : ""}`}</div>
+              </div>
+            </div>
+          );
+        })()}
         {unitCount(part) > 1 && (
           <div className="field">
             <label>Units</label>

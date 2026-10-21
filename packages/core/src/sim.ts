@@ -4,7 +4,8 @@
 // (simulation source or regulator output) already drives the net.
 import { getPart } from "./library";
 import { computeNets, netByTerminal, termKey } from "./netlist";
-import type { ComponentData, Design, SpiceModel, SpiceModelType } from "./types";
+import { parseModelCard, spiceNumber, subcktInstances } from "./spice";
+import type { ComponentData, Design, SpiceModel, SpiceModelType, SpiceSubckt } from "./types";
 
 const PREFIX: Record<string, number> = { p: 1e-12, n: 1e-9, u: 1e-6, "µ": 1e-6, m: 1e-3, k: 1e3, K: 1e3, M: 1e6, G: 1e9 };
 
@@ -92,6 +93,8 @@ interface Linear {
   b: number;
   value: number;
   ratedW?: number;
+  /** Inside a subcircuit: simulated but not listed in results. */
+  internal?: boolean;
 }
 interface VSource {
   ref: string;
@@ -100,6 +103,7 @@ interface VSource {
   n: number;
   spec: SourceSpec;
   supply: boolean;
+  internal?: boolean;
 }
 interface ISource {
   ref: string;
@@ -120,6 +124,22 @@ interface Device {
   led?: boolean;
   /** Stateful devices (555) update their state after a solution; returns true if it changed. */
   update?: (v: number[]) => boolean;
+  internal?: boolean;
+}
+
+/**
+ * Controlled sources from subcircuits, with linear polynomial control (SPICE POLY):
+ * output = offset + sum(gain * control), each control a node-pair voltage or a voltage source's
+ * branch current. Voltage outputs (E, H) add a branch-current row; current outputs (G, F) stamp
+ * into the node rows.
+ */
+interface Controlled {
+  kind: "E" | "F" | "G" | "H";
+  ref: string;
+  p: number;
+  n: number;
+  terms: { cp: number; cn: number; ctrl?: string; gain: number }[];
+  offset: number;
 }
 
 interface Circuit {
@@ -128,10 +148,141 @@ interface Circuit {
   vsrc: VSource[];
   isrc: ISource[];
   devices: Device[];
+  controlled: Controlled[];
+  /** Nodes inside subcircuits (simulated, not reported). */
+  internalNodes: Set<string>;
   notModeled: string[];
   warnings: string[];
   /** Op-amp open-loop gain; lowered temporarily for gain-stepping continuation. */
   params: { opGain: number };
+}
+
+/** Unknowns: node voltages, then voltage-source currents, then E/H branch currents. */
+const systemSize = (ckt: Circuit) => ckt.nodeNames.length + ckt.vsrc.length + ckt.controlled.filter((c) => c.kind === "E" || c.kind === "H").length;
+
+/**
+ * Stamp the controlled sources (frequency independent, so DC, transient and AC share this). With
+ * `z`, their constant offsets go to the right-hand side too (not for small-signal AC).
+ */
+function stampControlled(ckt: Circuit, A: Float64Array[], z?: Float64Array, scale = 1) {
+  const n = ckt.nodeNames.length;
+  let row = n + ckt.vsrc.length;
+  const add = (r: number, c: number, v: number) => {
+    if (r >= 0 && c >= 0) A[r][c] += v;
+  };
+  const branch = (ref: string | undefined) => {
+    const j = ckt.vsrc.findIndex((v) => v.ref === ref);
+    return j < 0 ? -1 : n + j;
+  };
+  for (const s of ckt.controlled) {
+    if (s.kind === "G" || s.kind === "F") {
+      // Current flows from p, through the source, to n.
+      for (const t of s.terms) {
+        if (t.ctrl !== undefined) {
+          const c = branch(t.ctrl);
+          add(s.p, c, t.gain);
+          add(s.n, c, -t.gain);
+        } else {
+          add(s.p, t.cp, t.gain);
+          add(s.p, t.cn, -t.gain);
+          add(s.n, t.cp, -t.gain);
+          add(s.n, t.cn, t.gain);
+        }
+      }
+      if (z && s.offset) {
+        if (s.p >= 0) z[s.p] -= scale * s.offset;
+        if (s.n >= 0) z[s.n] += scale * s.offset;
+      }
+    } else {
+      const r = row++;
+      add(s.p, r, 1);
+      add(s.n, r, -1);
+      add(r, s.p, 1);
+      add(r, s.n, -1);
+      for (const t of s.terms) {
+        if (t.ctrl !== undefined) add(r, branch(t.ctrl), -t.gain);
+        else {
+          add(r, t.cp, -t.gain);
+          add(r, t.cn, t.gain);
+        }
+      }
+      if (z) z[r] = scale * s.offset;
+    }
+  }
+}
+
+// ---------- device equations (shared by library parts and subcircuit elements) ----------
+
+function diodeDevice(ref: string, label: string, a: number, k: number, is: number, nvt: number, rs: number, led = false): Device {
+  return {
+    kind: "D",
+    ref,
+    label,
+    led,
+    nodes: [a, k],
+    f: ([va, vk]) => {
+      const i = diodeCurrent(va - vk, is, nvt, rs);
+      return [i, -i];
+    },
+    report: { terminal: 0, across: [0, 1] },
+  };
+}
+
+function bjtDevice(ref: string, label: string, c: number, b: number, e: number, P: Record<string, number>, pnp: boolean): Device {
+  const IS = P.IS ?? 1e-14;
+  const BF = P.BF ?? 200;
+  const BR = P.BR ?? 2;
+  const nf = (P.NF ?? 1) * VT;
+  const nr = (P.NR ?? 1) * VT;
+  const VAF = P.VAF ?? Infinity;
+  const pol = pnp ? -1 : 1;
+  return {
+    kind: "Q",
+    ref,
+    label,
+    nodes: [c, b, e],
+    f: ([vc, vb, ve]) => {
+      // Ebers-Moll transport model with the Early effect; PNP is the NPN with all polarities flipped.
+      const fe = sexp((pol * (vb - ve)) / nf) - 1;
+      const fc = sexp((pol * (vb - vc)) / nr) - 1;
+      const early = Number.isFinite(VAF) ? Math.max(0.1, 1 + (pol * (vc - ve)) / VAF) : 1;
+      const ict = IS * (fe - fc) * early;
+      const ic = ict - (IS / BR) * fc;
+      const ib = (IS / BF) * fe + (IS / BR) * fc;
+      return [pol * ic, pol * ib, -pol * (ic + ib)];
+    },
+    report: { terminal: 0, across: [0, 2] },
+  };
+}
+
+function mosDevice(ref: string, label: string, d: number, g: number, s: number, P: Record<string, number>, pmos: boolean, defaultK = 10): Device {
+  const VTH = Math.abs(P.VTO ?? 1.0);
+  // KP is per square; SPICE level-1 cards give W and L, power-MOSFET (VDMOS) cards fold them into KP.
+  const K = P.KP !== undefined ? P.KP * ((P.W ?? 1) / (P.L ?? 1)) : defaultK;
+  const LAMBDA = P.LAMBDA ?? 0.01;
+  const soft = 2 * VT;
+  const pol = pmos ? -1 : 1;
+  return {
+    kind: "M",
+    ref,
+    label,
+    nodes: [d, g, s],
+    f: ([vd0, vg0, vs0]) => {
+      // Symmetric level-1 model with a smooth turn-on; PMOS mirrors every voltage and current.
+      const vd = pol * vd0;
+      const vg = pol * vg0;
+      const vs = pol * vs0;
+      const flip = vd < vs;
+      const dd = flip ? vs : vd;
+      const ss = flip ? vd : vs;
+      const vov = soft * Math.log1p(sexp((vg - ss - VTH) / soft));
+      const vds = dd - ss;
+      const id = vds < vov ? K * (vov * vds - (vds * vds) / 2) * (1 + LAMBDA * vds) : (K / 2) * vov * vov * (1 + LAMBDA * vds);
+      const i = pol * (flip ? -id : id);
+      return [i, 0, -i];
+    },
+    report: { terminal: 0, across: [0, 2] },
+  };
 }
 
 function diodeParams(c: ComponentData): { vf: number; n: number; led: boolean } {
@@ -160,6 +311,206 @@ function diodeCurrent(v: number, is: number, nvt: number, rs: number): number {
   return is * (sexp(vj / nvt) - 1);
 }
 
+interface ExpandCtx {
+  node: (net: string | undefined) => number;
+  models: Map<string, SpiceModel>;
+  subckts: Map<string, SpiceSubckt>;
+}
+
+const num = (s: string | undefined) => (s === undefined ? null : spiceNumber(s.replace(/^\{|\}$/g, "")));
+
+/** DC (and AC magnitude) of a subcircuit V/I element's value text. */
+function elementSource(rest: string[]): SourceSpec {
+  const t = rest.join(" ");
+  const ac = t.match(/\bAC\s+(\S+)/i);
+  const dc = t.match(/^(?:DC\s+)?(\S+)/i);
+  const spec = /PULSE|SIN/i.test(t) ? parseSource(t) : { dc: dc && !/^AC$/i.test(dc[1]) ? num(dc[1]) ?? 0 : 0, ac: 0 };
+  return { ...spec, ac: ac ? num(ac[1]) ?? 0 : spec.ac };
+}
+
+/**
+ * An E/F/G/H line: plain ("E1 p n cp cn gain", "F1 p n Vname gain") or linear POLY(k)
+ * ("E1 p n POLY(2) (a,b) (c,d) p0 p1 p2", "F1 p n POLY(2) V1 V2 p0 p1 p2"). Nonlinear polynomial
+ * terms are not supported.
+ */
+function controlledSource(kind: "E" | "F" | "G" | "H", line: string, ref: (name: string) => string, nd: (name: string) => number): Controlled | string {
+  const toks = line.replace(/[(),]/g, " ").split(/\s+/).filter(Boolean);
+  const [name, p, n] = toks;
+  const byCurrent = kind === "F" || kind === "H";
+  const rest = toks.slice(3);
+  const polyAt = rest.findIndex((t) => /^POLY$/i.test(t));
+  let k = 1;
+  let args = rest;
+  if (polyAt === 0) {
+    k = Number(rest[1]);
+    if (!(k >= 1)) return "bad POLY order";
+    args = rest.slice(2);
+  }
+  const per = byCurrent ? 1 : 2;
+  const ctrl = args.slice(0, k * per);
+  const coef = args.slice(k * per).map((t) => spiceNumber(t));
+  if (ctrl.length < k * per || coef.some((c) => c === null)) return "cannot read its control or coefficients";
+  let offset = 0;
+  let gains: number[];
+  if (polyAt === 0) {
+    offset = coef[0] ?? 0;
+    gains = Array.from({ length: k }, (_, i) => coef[i + 1] ?? 0);
+    if (coef.length > k + 1 && coef.slice(k + 1).some((c) => c !== 0)) return "nonlinear POLY terms are not supported";
+  } else {
+    if (coef.length !== 1) return "cannot read its gain";
+    gains = [coef[0]!];
+  }
+  const terms = gains.map((gain, i) =>
+    byCurrent ? { cp: -1, cn: -1, ctrl: ref(ctrl[i]), gain } : { cp: nd(ctrl[2 * i]), cn: nd(ctrl[2 * i + 1]), gain },
+  );
+  void name;
+  return { kind, ref: ref(name), p: nd(p), n: nd(n), terms, offset };
+}
+
+/**
+ * Add a subcircuit instance's elements to the circuit. Ports map to the outer nodes; internal nodes
+ * and element names are prefixed with the instance path (U1A.Q1); node 0 is ground.
+ */
+function expandSubckt(ckt: Circuit, sub: SpiceSubckt, outer: number[], prefix: string, ctx: ExpandCtx, depth: number) {
+  if (depth > 10) return void ckt.warnings.push(`${prefix}: subcircuits nested too deeply`);
+  const local = new Map<string, number>(sub.ports.map((p, i) => [p.toUpperCase(), outer[i]]));
+  const nd = (name: string) => {
+    const u = name.toUpperCase();
+    if (u === "0" || u === "GND") return -1;
+    if (!local.has(u)) {
+      ckt.internalNodes.add(`${prefix}.${u}`);
+      local.set(u, ctx.node(`${prefix}.${u}`));
+    }
+    return local.get(u)!;
+  };
+  // Local .model cards and nested .subckt definitions shadow the design's.
+  const models = new Map(ctx.models);
+  const subckts = new Map(ctx.subckts);
+  const body: string[] = [];
+  let nested: SpiceSubckt | null = null;
+  let depthN = 0;
+  for (const line of sub.lines) {
+    const def = line.match(/^\.subckt\s+(\S+)\s*(.*)$/i);
+    if (nested) {
+      if (def) depthN++;
+      if (/^\.ends\b/i.test(line) && depthN-- === 0) {
+        subckts.set(nested.name, nested);
+        nested = null;
+      } else nested.lines.push(line);
+      continue;
+    }
+    if (def) {
+      nested = { name: def[1].toUpperCase(), ports: def[2].split(/\s+/).filter((t) => t && !t.includes("=") && !/^params:$/i.test(t)), lines: [] };
+      depthN = 0;
+      continue;
+    }
+    const card = parseModelCard(line);
+    if (card && typeof card !== "string") models.set(card.name, card);
+    else if (!card && !line.startsWith(".")) body.push(line);
+  }
+  const skipped = new Set<string>();
+  const ref = (name: string) => `${prefix}.${name.toUpperCase()}`;
+  const value = (t: string | undefined, what: string, name: string) => {
+    const v = num(t);
+    if (v === null) skipped.add(`${name} (${what} "${t ?? ""}")`);
+    return v;
+  };
+  // Voltage sources first: F and H elements refer to them by name.
+  const ordered = [...body.filter((l) => /^V/i.test(l)), ...body.filter((l) => !/^V/i.test(l))];
+  for (const line of ordered) {
+    const tok = line.split(/\s+/);
+    const name = tok[0];
+    const kind = name[0].toUpperCase();
+    const behavioural = /\b(VALUE|TABLE|LAPLACE)\b|[{]/i.test(line) && kind !== "X";
+    if (behavioural && "EFGHB".includes(kind)) {
+      skipped.add(`${name} (behavioural source)`);
+      continue;
+    }
+    switch (kind) {
+      case "R":
+      case "C":
+      case "L": {
+        const v = value(tok[3], "value", name);
+        if (v !== null && (kind !== "R" || v > 0)) ckt.linear.push({ kind, ref: ref(name), label: ref(name), a: nd(tok[1]), b: nd(tok[2]), value: v, internal: true });
+        break;
+      }
+      case "V":
+        ckt.vsrc.push({ ref: ref(name), label: ref(name), p: nd(tok[1]), n: nd(tok[2]), spec: elementSource(tok.slice(3)), supply: false, internal: true });
+        break;
+      case "I":
+        // SPICE drives the current from n+ through the source and out at n-; this circuit's
+        // current sources push their current out at p.
+        ckt.isrc.push({ ref: ref(name), label: ref(name), p: nd(tok[2]), n: nd(tok[1]), spec: elementSource(tok.slice(3)) });
+        break;
+      case "E":
+      case "F":
+      case "G":
+      case "H": {
+        const ctl = controlledSource(kind, line, ref, nd);
+        if (typeof ctl === "string") skipped.add(`${name} (${ctl})`);
+        else ckt.controlled.push(ctl);
+        break;
+      }
+      case "D": {
+        const m = models.get((tok[3] ?? "").toUpperCase());
+        if (!m || m.type !== "D") {
+          skipped.add(`${name} (no diode model ${tok[3]})`);
+          break;
+        }
+        const area = num(tok[4]) ?? 1;
+        const d = diodeDevice(ref(name), ref(name), nd(tok[1]), nd(tok[2]), (m.params.IS ?? 1e-14) * area, (m.params.N ?? 1) * VT, (m.params.RS ?? 0) / area);
+        ckt.devices.push({ ...d, internal: true });
+        break;
+      }
+      case "Q": {
+        // Q c b e [substrate] model
+        const mi = tok.findIndex((t, i) => i >= 4 && models.has(t.toUpperCase()));
+        const m = mi >= 0 ? models.get(tok[mi].toUpperCase()) : undefined;
+        if (!m || (m.type !== "NPN" && m.type !== "PNP")) {
+          skipped.add(`${name} (no BJT model)`);
+          break;
+        }
+        const area = num(tok[mi + 1]) ?? 1;
+        const P = { ...m.params, IS: (m.params.IS ?? 1e-14) * area };
+        ckt.devices.push({ ...bjtDevice(ref(name), ref(name), nd(tok[1]), nd(tok[2]), nd(tok[3]), P, m.type === "PNP"), internal: true });
+        break;
+      }
+      case "M": {
+        // M d g s b model [W= L=]
+        const m = models.get((tok[5] ?? "").toUpperCase());
+        if (!m || (m.type !== "NMOS" && m.type !== "PMOS")) {
+          skipped.add(`${name} (no MOSFET model ${tok[5]})`);
+          break;
+        }
+        const kv = Object.fromEntries(tok.slice(6).map((t) => t.split("=")).filter((x) => x.length === 2).map(([k, v]) => [k.toUpperCase(), num(v) ?? 0]));
+        // Level-1 KP is per square: W/L from the instance when the card has none.
+        const P = { ...m.params, ...(kv.W && !m.params.W ? { W: kv.W } : {}), ...(kv.L && !m.params.L ? { L: kv.L } : {}) };
+        ckt.devices.push({ ...mosDevice(ref(name), ref(name), nd(tok[1]), nd(tok[2]), nd(tok[3]), P, m.type === "PMOS", 2e-5), internal: true });
+        break;
+      }
+      case "X": {
+        // X n1 n2 ... subname [params]
+        const args = tok.slice(1).filter((t) => !t.includes("=") && !/^params:$/i.test(t));
+        const target = subckts.get((args[args.length - 1] ?? "").toUpperCase());
+        if (!target) {
+          skipped.add(`${name} (no subcircuit ${args[args.length - 1]})`);
+          break;
+        }
+        const nodes = args.slice(0, -1);
+        if (nodes.length !== target.ports.length) {
+          skipped.add(`${name} (${nodes.length} nodes for ${target.ports.length} ports)`);
+          break;
+        }
+        expandSubckt(ckt, target, nodes.map(nd), ref(name), { ...ctx, models, subckts }, depth + 1);
+        break;
+      }
+      default:
+        skipped.add(`${name} (element type ${kind} is not supported)`);
+    }
+  }
+  if (skipped.size) ckt.warnings.push(`${prefix} (${sub.name}): skipped ${[...skipped].slice(0, 6).join(", ")}${skipped.size > 6 ? ` and ${skipped.size - 6} more` : ""}`);
+}
+
 function buildCircuit(design: Design): Circuit | string {
   const nets = computeNets(design);
   const netOf = netByTerminal(nets);
@@ -175,10 +526,11 @@ function buildCircuit(design: Design): Circuit | string {
     }
     return nodeIdx.get(net)!;
   };
-  const ckt: Circuit = { nodeNames, linear: [], vsrc: [], isrc: [], devices: [], notModeled: [], warnings: [], params: { opGain: 1e5 } };
+  const ckt: Circuit = { nodeNames, linear: [], vsrc: [], isrc: [], devices: [], controlled: [], internalNodes: new Set(), notModeled: [], warnings: [], params: { opGain: 1e5 } };
   const params = ckt.params;
   const driven = new Set<number>();
   const models = new Map(design.spiceModels.map((m) => [m.name, m]));
+  const subckts = new Map((design.spiceSubckts ?? []).map((m) => [m.name.toUpperCase(), m]));
   const modelFor = (c: ComponentData, type: SpiceModelType): SpiceModel | undefined => {
     if (!c.model) return undefined;
     const m = models.get(c.model.toUpperCase());
@@ -193,6 +545,33 @@ function buildCircuit(design: Design): Circuit | string {
     const id = c.partId;
     const pn = (pin: string) => node(netOf.get(termKey({ comp: c.id, pin })));
     const label = `${c.ref} ${c.value}`;
+    // A subcircuit model replaces the part's built-in model.
+    const sub = c.model ? subckts.get(c.model.toUpperCase()) : undefined;
+    if (sub) {
+      const inst = subcktInstances(part, sub, c.spicePins);
+      if (typeof inst === "string") ckt.warnings.push(`${c.ref}: ${inst}; using the built-in model`);
+      else {
+        for (const { suffix, pins } of inst) {
+          const outer = pins.map(pn);
+          const before = { v: ckt.vsrc.length, c: ckt.controlled.length, l: ckt.linear.length };
+          expandSubckt(ckt, sub, outer, `${c.ref}${suffix}`, { node, models, subckts }, 0);
+          // Ports the model drives (a ground-referenced voltage-type source on them, directly or
+          // through a small resistance, like an op-amp or regulator output) are not forced to ideal
+          // rail supplies. Level shifts between two nodes (e.g. from a supply pin) do not count.
+          const sourced = new Set<number>();
+          for (const v of [...ckt.vsrc.slice(before.v), ...ckt.controlled.slice(before.c).filter((e) => e.kind === "E" || e.kind === "H")]) {
+            if (v.n < 0 && v.p >= 0) sourced.add(v.p);
+            if (v.p < 0 && v.n >= 0) sourced.add(v.n);
+          }
+          for (const k of outer) {
+            if (k < 0) continue;
+            const near = sourced.has(k) || ckt.linear.slice(before.l).some((e) => e.kind === "R" && e.value <= 1000 && ((e.a === k && sourced.has(e.b)) || (e.b === k && sourced.has(e.a))));
+            if (near) driven.add(k);
+          }
+        }
+        continue;
+      }
+    }
     if (id.startsWith("resistor")) {
       const r = parseValue(c.value);
       if (!r || r <= 0) ckt.warnings.push(`${c.ref}: cannot parse resistance "${c.value}"`);
@@ -208,76 +587,13 @@ function buildCircuit(design: Design): Circuit | string {
       const nvt = N * VT;
       const is = model?.params.IS ?? (model ? 1e-14 : 0.01 / Math.exp(vf / nvt));
       const rs = model?.params.RS ?? 0;
-      ckt.devices.push({
-        kind: "D",
-        ref: c.ref,
-        label,
-        led,
-        nodes: [pn("2"), pn("1")], // anode, cathode
-        f: ([va, vk]) => {
-          const i = diodeCurrent(va - vk, is, nvt, rs);
-          return [i, -i];
-        },
-        report: { terminal: 0, across: [0, 1] },
-      });
+      ckt.devices.push(diodeDevice(c.ref, label, pn("2"), pn("1"), is, nvt, rs, led)); // anode, cathode
     } else if (id.startsWith("npn") || id.startsWith("pnp")) {
       const pnp = id.startsWith("pnp");
-      const P = modelFor(c, pnp ? "PNP" : "NPN")?.params ?? {};
-      const IS = P.IS ?? 1e-14;
-      const BF = P.BF ?? 200;
-      const BR = P.BR ?? 2;
-      const nf = (P.NF ?? 1) * VT;
-      const nr = (P.NR ?? 1) * VT;
-      const VAF = P.VAF ?? Infinity;
-      const pol = pnp ? -1 : 1;
-      ckt.devices.push({
-        kind: "Q",
-        ref: c.ref,
-        label,
-        nodes: [pn("3"), pn("1"), pn("2")], // C, B, E
-        f: ([vc, vb, ve]) => {
-          // Ebers-Moll transport model with the Early effect; PNP is the NPN with all polarities flipped.
-          const fe = sexp((pol * (vb - ve)) / nf) - 1;
-          const fc = sexp((pol * (vb - vc)) / nr) - 1;
-          const early = Number.isFinite(VAF) ? Math.max(0.1, 1 + (pol * (vc - ve)) / VAF) : 1;
-          const ict = IS * (fe - fc) * early;
-          const ic = ict - (IS / BR) * fc;
-          const ib = (IS / BF) * fe + (IS / BR) * fc;
-          return [pol * ic, pol * ib, -pol * (ic + ib)];
-        },
-        report: { terminal: 0, across: [0, 2] },
-      });
+      ckt.devices.push(bjtDevice(c.ref, label, pn("3"), pn("1"), pn("2"), modelFor(c, pnp ? "PNP" : "NPN")?.params ?? {}, pnp)); // C, B, E
     } else if (id.startsWith("nmos") || id.startsWith("pmos")) {
       const pmos = id.startsWith("pmos");
-      const model = modelFor(c, pmos ? "PMOS" : "NMOS");
-      const P = model?.params ?? {};
-      const VTH = Math.abs(P.VTO ?? 1.0);
-      // KP is per square; SPICE level-1 cards give W and L, power-MOSFET (VDMOS) cards fold them into KP.
-      const K = P.KP !== undefined ? P.KP * ((P.W ?? 1) / (P.L ?? 1)) : 10;
-      const LAMBDA = P.LAMBDA ?? 0.01;
-      const soft = 2 * VT;
-      const pol = pmos ? -1 : 1;
-      ckt.devices.push({
-        kind: "M",
-        ref: c.ref,
-        label,
-        nodes: [pn("3"), pn("1"), pn("2")], // D, G, S
-        f: ([vd0, vg0, vs0]) => {
-          // Symmetric level-1 model with a smooth turn-on; PMOS mirrors every voltage and current.
-          const vd = pol * vd0;
-          const vg = pol * vg0;
-          const vs = pol * vs0;
-          const flip = vd < vs;
-          const d = flip ? vs : vd;
-          const s = flip ? vd : vs;
-          const vov = soft * Math.log1p(sexp((vg - s - VTH) / soft));
-          const vds = d - s;
-          const id = vds < vov ? K * (vov * vds - (vds * vds) / 2) * (1 + LAMBDA * vds) : (K / 2) * vov * vov * (1 + LAMBDA * vds);
-          const i = pol * (flip ? -id : id);
-          return [i, 0, -i];
-        },
-        report: { terminal: 0, across: [0, 2] },
-      });
+      ckt.devices.push(mosDevice(c.ref, label, pn("3"), pn("1"), pn("2"), modelFor(c, pmos ? "PMOS" : "NMOS")?.params ?? {}, pmos)); // D, G, S
     } else if (id.startsWith("lm358")) {
       const amp = (inp: string, inn: string, out: string, label2: string) => ({
         kind: "OPAMP" as const,
@@ -395,7 +711,7 @@ interface Mode {
 
 function assembleAndSolve(ckt: Circuit, x0: Float64Array, mode: Mode): Float64Array | null {
   const n = ckt.nodeNames.length;
-  const size = n + ckt.vsrc.length;
+  const size = systemSize(ckt);
   let x: Float64Array = Float64Array.from(x0);
   const scale = mode.scale ?? 1;
   const V = (k: number, xs: Float64Array) => (k < 0 ? 0 : xs[k]);
@@ -438,6 +754,7 @@ function assembleAndSolve(ckt: Circuit, x0: Float64Array, mode: Mode): Float64Ar
       if (s.n >= 0) (A[s.n][row] -= 1), (A[row][s.n] -= 1);
       z[row] = scale * (mode.kind === "tran" ? sourceAt(s.spec, t) : s.spec.dc);
     });
+    stampControlled(ckt, A, z, scale);
     for (const d of ckt.devices) {
       const v = d.nodes.map((k) => V(k, x));
       const i0 = d.f(v);
@@ -476,8 +793,7 @@ function assembleAndSolve(ckt: Circuit, x0: Float64Array, mode: Mode): Float64Ar
 
 /** DC solution with source stepping as a fallback for hard circuits. */
 function solveOp(ckt: Circuit): { x: Float64Array; converged: boolean } {
-  const size = ckt.nodeNames.length + ckt.vsrc.length;
-  const zero = new Float64Array(size);
+  const zero = new Float64Array(systemSize(ckt));
   if (ckt.devices.some((d) => d.kind === "OPAMP")) {
     // Gain stepping: high-gain feedback loops converge from a low-gain solution.
     let guess: Float64Array = zero;
@@ -560,11 +876,13 @@ function elementResults(ckt: Circuit, x: Float64Array, capI?: Map<Linear, number
   const V = (k: number) => (k < 0 ? 0 : x[k]);
   const out: SimElementResult[] = [];
   for (const e of ckt.linear) {
+    if (e.internal) continue;
     const v = V(e.a) - V(e.b);
     const i = e.kind === "R" ? v / e.value : e.kind === "C" ? capI?.get(e) ?? 0 : indI?.get(e) ?? v * 1e3;
     out.push({ ref: e.ref, label: e.label, current: i, voltage: v, power: v * i });
   }
   for (const d of ckt.devices) {
+    if (d.internal) continue;
     const v = d.nodes.map(V);
     const i = d.f(v)[d.report.terminal];
     const vv = v[d.report.across[0]] - v[d.report.across[1]];
@@ -612,13 +930,14 @@ export function simulateDC(design: Design): SimResult {
     if (r && rating && Math.abs(r.current) > rating) warnings.push(`${c.ref} carries ${(Math.abs(r.current) * 1000).toFixed(0)}mA, above its ${c.value} rating`);
   }
   const n = ckt.nodeNames.length;
-  const supplies = ckt.vsrc.map((s, j) => {
+  const supplies = ckt.vsrc.flatMap((s, j) => {
+    if (s.internal) return [];
     const i = -x[n + j];
     const v = s.spec.dc;
-    return { name: s.supply ? s.ref : s.label, voltage: v, current: i, power: v * i };
+    return [{ name: s.supply ? s.ref : s.label, voltage: v, current: i, power: v * i }];
   });
   const ground = computeNets(design).find((m) => isGroundNet(m.name))!.name;
-  const nodes = [{ net: ground, voltage: 0 }, ...ckt.nodeNames.map((net, k) => ({ net, voltage: x[k] }))].sort((a, b) => a.net.localeCompare(b.net, undefined, { numeric: true }));
+  const nodes = [{ net: ground, voltage: 0 }, ...ckt.nodeNames.map((net, k) => ({ net, voltage: x[k] })).filter((nd) => !ckt.internalNodes.has(nd.net))].sort((a, b) => a.net.localeCompare(b.net, undefined, { numeric: true }));
   if (ckt.notModeled.length) warnings.push(`Not simulated (no model yet): ${ckt.notModeled.join(", ")}`);
   return { ok: true, nodes, elements: results, supplies, warnings, notModeled: ckt.notModeled, iterations: 0 };
 }
@@ -657,11 +976,11 @@ export function simulateTransient(design: Design, opts: { tstop: number; points?
   }
   const time: number[] = [0];
   const nodes: Record<string, number[]> = {};
-  ckt.nodeNames.forEach((nm) => (nodes[nm] = [0]));
-  const refs = [...ckt.linear.map((e) => e.ref), ...ckt.devices.map((d) => d.ref), ...ckt.vsrc.filter((s) => !s.supply).map((s) => s.ref)];
+  ckt.nodeNames.forEach((nm) => !ckt.internalNodes.has(nm) && (nodes[nm] = [0]));
+  const refs = [...ckt.linear.filter((e) => !e.internal).map((e) => e.ref), ...ckt.devices.filter((d) => !d.internal).map((d) => d.ref), ...ckt.vsrc.filter((s) => !s.supply && !s.internal).map((s) => s.ref)];
   const currents: Record<string, number[]> = {};
   refs.forEach((r) => (currents[r] = [0]));
-  let x: Float64Array = new Float64Array(n + ckt.vsrc.length);
+  let x: Float64Array = new Float64Array(systemSize(ckt));
   let failures = 0;
   const V = (k: number, xs: Float64Array) => (k < 0 ? 0 : xs[k]);
   for (let step = 1; step <= points; step++) {
@@ -687,10 +1006,10 @@ export function simulateTransient(design: Design, opts: { tstop: number; points?
       } else if (e.kind === "L") indI.set(e, indI.get(e)! + (dt / e.value) * v);
     }
     time.push(t);
-    ckt.nodeNames.forEach((nm, k) => nodes[nm].push(x[k]));
+    ckt.nodeNames.forEach((nm, k) => nodes[nm]?.push(x[k]));
     const er = elementResults(ckt, x, capI, indI);
     for (const e of er) currents[e.ref]?.push(e.current);
-    ckt.vsrc.forEach((s, j) => !s.supply && currents[s.ref].push(-x[n + j]));
+    ckt.vsrc.forEach((s, j) => !s.supply && !s.internal && currents[s.ref].push(-x[n + j]));
   }
   for (const d of ckt.devices) {
     if (!d.led) continue;
@@ -723,7 +1042,7 @@ export function simulateAC(design: Design, opts: { fstart: number; fstop: number
   if (!op.converged) return fail("The DC operating point did not converge.");
   const x = settle555(ckt, op.x).x;
   const n = ckt.nodeNames.length;
-  const size = n + ckt.vsrc.length;
+  const size = systemSize(ckt);
   const V = (k: number) => (k < 0 ? 0 : x[k]);
   // Real (conductance) part: resistors, inductor-free DC network and device Jacobians at the OP.
   const G = Array.from({ length: size }, () => new Float64Array(size));
@@ -750,13 +1069,14 @@ export function simulateAC(design: Design, opts: { fstart: number; fstop: number
     if (s.p >= 0) (G[s.p][row] += 1), (G[row][s.p] += 1);
     if (s.n >= 0) (G[s.n][row] -= 1), (G[row][s.n] -= 1);
   });
+  stampControlled(ckt, G);
   const ppd = Math.max(1, Math.round(opts.pointsPerDecade ?? 20));
   const decades = Math.log10(opts.fstop / opts.fstart);
   if (!(decades > 0)) return fail("fstop must be greater than fstart");
   const count = Math.max(2, Math.round(decades * ppd) + 1);
   const freq: number[] = [];
   const nodes: Record<string, { mag: number[]; phase: number[] }> = {};
-  ckt.nodeNames.forEach((nm) => (nodes[nm] = { mag: [], phase: [] }));
+  ckt.nodeNames.forEach((nm) => !ckt.internalNodes.has(nm) && (nodes[nm] = { mag: [], phase: [] }));
   for (let k = 0; k < count; k++) {
     const f = opts.fstart * 10 ** ((decades * k) / (count - 1));
     const w = 2 * Math.PI * f;
@@ -776,6 +1096,7 @@ export function simulateAC(design: Design, opts: { fstart: number; fstop: number
     if (!sol) return fail(`AC matrix is singular at ${f.toPrecision(3)}Hz`);
     freq.push(f);
     ckt.nodeNames.forEach((nm, i) => {
+      if (!nodes[nm]) return;
       const mag = Math.hypot(sol.re[i], sol.im[i]);
       nodes[nm].mag.push(20 * Math.log10(Math.max(mag, 1e-15)));
       nodes[nm].phase.push((Math.atan2(sol.im[i], sol.re[i]) * 180) / Math.PI);
