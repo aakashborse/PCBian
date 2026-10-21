@@ -126,6 +126,8 @@ export interface ComponentData {
   dnp?: boolean;
   /** SPICE model name (from the design's imported models) used by the simulator. */
   model?: string;
+  /** Manufacturer part number for this instance (overrides the library part's, e.g. per value). */
+  mpn?: string;
 }
 
 export type SpiceModelType = "D" | "NPN" | "PNP" | "NMOS" | "PMOS";

@@ -833,3 +833,39 @@ textarea.mono {
   width: 100%;
   white-space: pre;
 }
+.bom .card {
+  padding: 8px;
+  margin-bottom: 6px;
+}
+.bom-total {
+  border-color: var(--accent-2);
+}
+.life {
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.life.ok {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+}
+.life.warn {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+}
+.life.bad {
+  background: rgba(239, 68, 68, 0.18);
+  color: #f87171;
+}
+.bom-find {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bom-pick {
+  text-align: left;
+  font-size: 12px;
+  white-space: normal;
+}

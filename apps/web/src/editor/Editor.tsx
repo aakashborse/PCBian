@@ -5,6 +5,7 @@ import { navigate } from "../lib/router";
 import { useDesign, useProjectConnection } from "../lib/useProject";
 import { useUser } from "../lib/user";
 import { HistoryPanel } from "./History";
+import { BomPanel } from "./Bom";
 import { ReviewPanel } from "./Review";
 import { initials, UserBadge } from "../pages/UserBadge";
 import { Checks } from "./Checks";
@@ -23,7 +24,7 @@ const Simulation = lazy(() => import("./Simulation").then((m) => ({ default: m.S
 const exporters = () => import("./exporters").then((m) => m.exporters);
 const Loading = () => <div className="hint">Loading…</div>;
 
-type RightTab = "copilot" | "inspect" | "checks" | "sim" | "review" | "history";
+type RightTab = "copilot" | "inspect" | "checks" | "bom" | "sim" | "review" | "history";
 
 export function Editor({ projectId }: { projectId: string }) {
   const { conn, synced, online } = useProjectConnection(projectId);
@@ -245,6 +246,9 @@ export function Editor({ projectId }: { projectId: string }) {
             <button className={tab === "checks" ? "on" : ""} onClick={() => setTab("checks")}>
               Checks
             </button>
+            <button className={tab === "bom" ? "on" : ""} onClick={() => setTab("bom")} title="Bill of materials and supplier data">
+              BOM
+            </button>
             <button className={tab === "sim" ? "on" : ""} onClick={() => setTab("sim")}>
               Sim
             </button>
@@ -258,6 +262,7 @@ export function Editor({ projectId }: { projectId: string }) {
           {tab === "copilot" && <Copilot enabled={copilot} />}
           {tab === "inspect" && <Inspector />}
           {tab === "checks" && <Checks />}
+          {tab === "bom" && <BomPanel />}
           {tab === "review" && <ReviewPanel />}
           {tab === "history" && <HistoryPanel />}
           {tab === "sim" && (

@@ -75,6 +75,10 @@ import {
   gerberFiles,
   getDesign,
   getPart,
+  bomCost,
+  bomLines,
+  bomRisks,
+  priceAt,
   compileRules,
   setDesignRules,
   normAngle,
@@ -93,19 +97,22 @@ import {
 } from "@pcbian/core";
 import type * as Y from "yjs";
 import { z } from "zod";
+import { mouser } from "./supplier.js";
 
 const pinSpec = z.string().describe('Pin as REF.pin, e.g. "R1.2" or "U1.VCC"');
 const rotation = z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]);
 const layer = z.union([z.literal("top"), z.literal("bottom"), z.templateLiteral(["in", z.number().int().min(1).max(30)])]).describe("top, in1 … in30 (inner layers that exist on the board), bottom");
 const point = z.object({ x: z.number(), y: z.number() });
 
-export interface ToolDef<S extends z.ZodObject> {
+export interface ToolDef<S extends z.ZodObject, P = undefined> {
   description: string;
   schema: S;
-  run: (doc: Y.Doc, input: z.infer<S>) => string | object;
+  /** Optional async work (network lookups) done before `run`, which then applies it in one transaction. */
+  prepare?: (doc: Y.Doc, input: z.infer<S>) => Promise<P>;
+  run: (doc: Y.Doc, input: z.infer<S>, prepared: P) => string | object;
   label: (input: z.infer<S>) => string;
 }
-const tool = <S extends z.ZodObject>(t: ToolDef<S>) => t;
+const tool = <S extends z.ZodObject, P = undefined>(t: ToolDef<S, P>) => t;
 
 const each = <T>(items: T[], fn: (x: T) => string) =>
   items
@@ -856,6 +863,53 @@ export const TOOLS = {
       };
     },
     label: () => "Simulate DC operating point",
+  }),
+  bom_pricing: tool({
+    description: "Live supplier check of the bill of materials (Mouser): stock, lifecycle (active/NRND/EOL/obsolete), price breaks and total cost for a number of boards, plus the lines at risk. Lines need a manufacturer part number (see set_mpn).",
+    schema: z.object({ boards: z.number().int().min(1).default(10) }),
+    prepare: async (doc) => {
+      if (!mouser.enabled) throw new Error("Supplier lookups are off: the server has no MOUSER_API_KEY");
+      return mouser.lookup(bomLines(getDesign(doc)).map((l) => l.mpn));
+    },
+    run: (doc, { boards }, prepared) => {
+      const lines = bomLines(getDesign(doc));
+      const cost = bomCost(lines, prepared.offers, boards);
+      return {
+        boards,
+        total: `${cost.total} ${cost.currency}`,
+        per_board: `${cost.perBoard} ${cost.currency}`,
+        priced_lines: `${cost.priced}/${cost.lines}`,
+        lines: lines.map((l) => {
+          const o = l.mpn ? prepared.offers[l.mpn] : undefined;
+          const p = o ? priceAt(o, l.qty * boards) : null;
+          return { refs: l.refs.join(" "), value: l.value, mpn: l.mpn || "(none)", stock: o?.stock, lifecycle: o?.lifecycle, unit: p?.unit, risks: bomRisks(l, o, boards) };
+        }),
+        errors: prepared.errors,
+      };
+    },
+    label: ({ boards }) => `Check BOM pricing for ${boards} boards`,
+  }),
+  find_supplier_parts: tool({
+    description: "Search the supplier (Mouser) by keywords, e.g. \"10k 0603 1% resistor\" or \"3.3V LDO SOT-223\", to choose a manufacturer part number. Returns in-stock candidates with price and lifecycle.",
+    schema: z.object({ keywords: z.string().min(2) }),
+    prepare: async (_doc, { keywords }) => {
+      if (!mouser.enabled) throw new Error("Supplier lookups are off: the server has no MOUSER_API_KEY");
+      return mouser.keyword(keywords);
+    },
+    run: (_doc, _input, offers) => offers.slice(0, 8).map((o) => ({ mpn: o.mpn, manufacturer: o.manufacturer, description: o.description, stock: o.stock, lifecycle: o.lifecycle, price_1: o.priceBreaks[0] ? `${o.priceBreaks[0].price} ${o.priceBreaks[0].currency}` : undefined })),
+    label: ({ keywords }) => `Search supplier for "${keywords}"`,
+  }),
+  set_mpn: tool({
+    description: "Set the manufacturer part number of components (e.g. all the 10k 0603 resistors), so the BOM and supplier checks can price them. An empty mpn clears it.",
+    schema: z.object({ refs: z.array(z.string()).min(1), mpn: z.string() }),
+    run: (doc, { refs, mpn }) =>
+      each(refs, (ref) => {
+        const c = findByRef(doc, ref);
+        if (!c) throw new Error(`No component ${ref}`);
+        updateComponent(doc, c.id, { mpn: mpn.trim() || undefined });
+        return `${ref}: ${mpn.trim() || "(cleared)"}`;
+      }),
+    label: ({ refs, mpn }) => `Set MPN ${mpn} on ${refs.join(", ")}`,
   }),
   fabrication_check: tool({
     description: "Final manufacturing readiness report: ERC/DRC error counts, unrouted nets, BOM size and the list of fabrication files that the Export menu will produce.",

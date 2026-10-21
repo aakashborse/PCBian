@@ -1,6 +1,7 @@
 // Manufacturing outputs: BOM, netlist, Gerber RS-274X and Excellon drill files.
 import { courtyardRect, ovalAxis, padCorners, padsOf, toWorld, type WorldPad } from "./geometry";
 import { getPart } from "./library";
+import { bomLines, bomRisks, priceAt, type SupplierOffer } from "./supplier";
 import { computeNets } from "./netlist";
 import { analyzeCopper, boardTeardrops, zoneFill } from "./copper";
 import { boardOutline } from "./doc";
@@ -10,21 +11,21 @@ import { fracture } from "./poly";
 import { zonesInDrawOrder } from "./zones";
 import type { ComponentData, CopperLayer, Design, Shape, Side, Vec, Via } from "./types";
 
-export function bomCsv(design: Design): string {
-  const groups = new Map<string, { refs: string[]; value: string; part: string; footprint: string; mpn: string }>();
-  for (const c of design.components) {
-    const part = getPart(c.partId);
-    if (!part || part.kind !== "part" || !part.footprint || c.dnp) continue;
-    const key = `${c.partId}|${c.value}`;
-    if (!groups.has(key)) groups.set(key, { refs: [], value: c.value, part: part.name, footprint: part.footprint?.name ?? "", mpn: part.mpn ?? "" });
-    groups.get(key)!.refs.push(c.ref);
-  }
+/** Bill of materials; with supplier offers and a board count it adds stock, lifecycle and prices. */
+export function bomCsv(design: Design, pricing?: { offers: Record<string, SupplierOffer | null | undefined>; boards: number }): string {
   const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
-  const rows = [...groups.values()]
-    .map((g) => ({ ...g, refs: g.refs.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })) }))
-    .sort((a, b) => a.refs[0].localeCompare(b.refs[0], undefined, { numeric: true }))
-    .map((g) => [g.refs.join(" "), String(g.refs.length), g.value, g.part, g.footprint, g.mpn].map(esc).join(","));
-  return ["References,Qty,Value,Part,Footprint,MPN", ...rows].join("\n") + "\n";
+  const head = ["References", "Qty", "Value", "Part", "Footprint", "MPN"];
+  if (pricing) head.push("Manufacturer", "Supplier SKU", "Stock", "Lifecycle", `Order qty (${pricing.boards} boards)`, "Unit price", "Extended", "Currency", "Risks");
+  const rows = bomLines(design).map((l) => {
+    const cells = [l.refs.join(" "), String(l.qty), l.value, l.part, l.footprint, l.mpn];
+    if (pricing) {
+      const o = l.mpn ? pricing.offers[l.mpn] : undefined;
+      const p = o ? priceAt(o, l.qty * pricing.boards) : null;
+      cells.push(o?.manufacturer ?? "", o?.sku ?? "", o ? String(o.stock) : "", o?.lifecycle ?? "", p ? String(p.orderQty) : "", p ? String(p.unit) : "", p ? p.extended.toFixed(2) : "", p?.currency ?? "", bomRisks(l, o, pricing.boards).join("; "));
+    }
+    return cells.map(esc).join(",");
+  });
+  return [head.join(","), ...rows].join("\n") + "\n";
 }
 
 export function netlistText(design: Design): string {

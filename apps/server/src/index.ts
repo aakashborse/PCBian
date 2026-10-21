@@ -9,6 +9,7 @@ import { copilotEnabled, isBusy, resetCopilot, runCopilot, stopCopilot } from ".
 import { dropRoom, getRoom, roomIdFromRequest, saveAll } from "./rooms.js";
 import { createProjectMeta, deleteProjectMeta, getProject, listProjects, updateProjectMeta } from "./store.js";
 import { buildTemplate, TEMPLATES, type TemplateId } from "./templates.js";
+import { mouser } from "./supplier.js";
 import { deleteVersions, diffVersion, listVersions, restoreVersion, saveVersion, versionUpdate } from "./versions.js";
 import * as Y from "yjs";
 
@@ -18,6 +19,26 @@ app.use(express.json({ limit: "60mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, copilot: copilotEnabled() });
+});
+
+// Supplier data (Mouser): status, part-number lookups and keyword search.
+app.get("/api/supplier", (_req, res) => {
+  res.json({ name: "Mouser", enabled: mouser.enabled });
+});
+app.post("/api/supplier/lookup", async (req, res) => {
+  const mpns = Array.isArray(req.body?.mpns) ? (req.body.mpns as unknown[]).filter((m): m is string => typeof m === "string").slice(0, 200) : [];
+  if (!mouser.enabled) return void res.status(503).json({ error: "Supplier lookups need MOUSER_API_KEY on the server" });
+  res.json(await mouser.lookup(mpns));
+});
+app.post("/api/supplier/search", async (req, res) => {
+  const keyword = String(req.body?.keyword ?? "").trim().slice(0, 120);
+  if (!keyword) return void res.status(400).json({ error: "keyword required" });
+  if (!mouser.enabled) return void res.status(503).json({ error: "Supplier lookups need MOUSER_API_KEY on the server" });
+  try {
+    res.json({ offers: await mouser.keyword(keyword) });
+  } catch (e) {
+    res.status(502).json({ error: (e as Error).message });
+  }
 });
 
 app.get("/api/templates", (_req, res) => {

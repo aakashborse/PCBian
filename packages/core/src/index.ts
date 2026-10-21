@@ -29,3 +29,4 @@ export * from "./rules";
 export * from "./altium-sch";
 export * from "./fabexpect";
 export * from "./poly";
+export * from "./supplier";

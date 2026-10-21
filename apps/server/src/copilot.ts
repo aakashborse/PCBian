@@ -198,8 +198,10 @@ export async function runCopilot(room: Room, message: string, author: string) {
         }
         try {
           let out: string | object = "";
+          // Async lookups first; then the edit happens in one transaction.
+          const prepared = def.prepare ? await def.prepare(doc, parsed.data as never) : undefined;
           doc.transact(() => {
-            out = def.run(doc, parsed.data);
+            out = def.run(doc, parsed.data as never, prepared as never);
           }, "copilot");
           doc.transact(() => tools.push([def.label(parsed.data)]), "copilot");
           results.push({ type: "tool_result", tool_use_id: use.id, content: typeof out === "string" ? out : JSON.stringify(out, null, 1) });

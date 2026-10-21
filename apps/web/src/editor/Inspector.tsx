@@ -110,6 +110,7 @@ export function Inspector() {
           </div>
         </div>
         {part.kind === "part" && <TextField label="Reference" value={c.ref} onChange={(ref) => updateComponent(doc, c.id, { ref })} />}
+        {part.kind === "part" && part.footprint && <TextField label="Manufacturer part number" value={c.mpn ?? part.mpn ?? ""} onChange={(mpn) => updateComponent(doc, c.id, { mpn: mpn.trim() && mpn.trim() !== part.mpn ? mpn.trim() : undefined })} />}
         {variant && part.kind === "part" ? (
           <>
             <TextField label={`Value (${variant.name})`} value={c.value} onChange={(value) => setVariant(doc, { ...variant, values: { ...variant.values, [c.ref]: value } })} />

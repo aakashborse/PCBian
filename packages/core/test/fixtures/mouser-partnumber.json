@@ -1,0 +1,53 @@
+{
+  "Errors": [],
+  "SearchResults": {
+    "NumberOfResult": 2,
+    "Parts": [
+      {
+        "Availability": "1250000 In Stock",
+        "DataSheetUrl": "https://www.mouser.com/datasheet/2/447/PYu_RC_Group_51_RoHS_L_12-3313492.pdf",
+        "Description": "Thick Film Resistors - SMD 10K ohm 1% 1/10W 0603",
+        "FactoryStock": "0",
+        "ImagePath": "https://www.mouser.com/images/yageo/images/RC0603_t.jpg",
+        "Category": "Thick Film Resistors - SMD",
+        "LeadTime": "56 Days",
+        "LifecycleStatus": null,
+        "Manufacturer": "YAGEO",
+        "ManufacturerPartNumber": "RC0603FR-0710KL",
+        "Min": "1",
+        "Mult": "1",
+        "MouserPartNumber": "603-RC0603FR-0710KL",
+        "ProductAttributes": [{ "AttributeName": "Packaging", "AttributeValue": "Cut Tape" }],
+        "PriceBreaks": [
+          { "Quantity": 1, "Price": "$0.10", "Currency": "USD" },
+          { "Quantity": 10, "Price": "$0.013", "Currency": "USD" },
+          { "Quantity": 100, "Price": "$0.006", "Currency": "USD" },
+          { "Quantity": 1000, "Price": "$0.003", "Currency": "USD" }
+        ],
+        "AlternatePackagings": null,
+        "ProductDetailUrl": "https://www.mouser.com/ProductDetail/YAGEO/RC0603FR-0710KL?qs=I1x9d1qz4D2D3ZBJbHGrBQ%3D%3D",
+        "Reeling": true,
+        "ROHSStatus": "RoHS Compliant",
+        "SuggestedReplacement": "",
+        "MultiSimBlue": 0,
+        "AvailabilityInStock": "1250000",
+        "AvailabilityOnOrder": [],
+        "InfoMessages": []
+      },
+      {
+        "Availability": "None",
+        "Description": "Thick Film Resistors - SMD 10K ohm 1% 1/10W 0603 (reel)",
+        "LifecycleStatus": null,
+        "Manufacturer": "YAGEO",
+        "ManufacturerPartNumber": "RC0603FR-0710KL",
+        "Min": "5000",
+        "Mult": "5000",
+        "MouserPartNumber": "603-RC0603FR-0710KLR",
+        "PriceBreaks": [{ "Quantity": 5000, "Price": "$0.002", "Currency": "USD" }],
+        "ProductDetailUrl": "https://www.mouser.com/ProductDetail/YAGEO/RC0603FR-0710KL-R",
+        "ROHSStatus": "RoHS Compliant",
+        "AvailabilityInStock": null
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "Errors": [],
+  "SearchResults": {
+    "NumberOfResult": 1,
+    "Parts": [
+      {
+        "Availability": "0 In Stock",
+        "Description": "LED Indicator Red 0603",
+        "LifecycleStatus": "End of Life",
+        "Manufacturer": "Kingbright",
+        "ManufacturerPartNumber": "APT1608EC",
+        "Min": "1",
+        "Mult": "1",
+        "MouserPartNumber": "604-APT1608EC",
+        "PriceBreaks": [{ "Quantity": 1, "Price": "$0.21", "Currency": "USD" }],
+        "AvailabilityInStock": "0"
+      }
+    ]
+  }
+}

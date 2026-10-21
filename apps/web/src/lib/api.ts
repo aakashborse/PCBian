@@ -1,4 +1,4 @@
-import type { DesignDiff } from "@pcbian/core";
+import type { DesignDiff, SupplierOffer } from "@pcbian/core";
 
 export interface ProjectMeta {
   id: string;
@@ -48,6 +48,9 @@ export interface VersionMeta {
 
 export const api = {
   health: () => call<{ ok: boolean; copilot: boolean }>("GET", "/api/health"),
+  supplier: () => call<{ name: string; enabled: boolean }>("GET", "/api/supplier"),
+  supplierLookup: (mpns: string[]) => call<{ offers: Record<string, SupplierOffer | null>; errors: string[] }>("POST", "/api/supplier/lookup", { mpns }),
+  supplierSearch: (keyword: string) => call<{ offers: SupplierOffer[] }>("POST", "/api/supplier/search", { keyword }),
   templates: () => call<Template[]>("GET", "/api/templates"),
   projects: () => call<ProjectMeta[]>("GET", "/api/projects"),
   project: (id: string) => call<ProjectMeta>("GET", `/api/projects/${id}`),

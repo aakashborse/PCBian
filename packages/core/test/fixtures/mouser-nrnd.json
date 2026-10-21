@@ -1,0 +1,27 @@
+{
+  "Errors": [],
+  "SearchResults": {
+    "NumberOfResult": 1,
+    "Parts": [
+      {
+        "Availability": "312 In Stock",
+        "Description": "Timers & Support Products Single Precision Timer",
+        "LeadTime": "84 Days",
+        "LifecycleStatus": "Not Recommended for New Designs",
+        "Manufacturer": "Texas Instruments",
+        "ManufacturerPartNumber": "NE555P",
+        "Min": "1",
+        "Mult": "1",
+        "MouserPartNumber": "595-NE555P",
+        "PriceBreaks": [
+          { "Quantity": 1, "Price": "0,52 €", "Currency": "EUR" },
+          { "Quantity": 50, "Price": "0,384 €", "Currency": "EUR" },
+          { "Quantity": 1000, "Price": "1.234,50 €", "Currency": "EUR" }
+        ],
+        "ProductDetailUrl": "https://www.mouser.com/ProductDetail/Texas-Instruments/NE555P",
+        "ROHSStatus": "RoHS Compliant",
+        "AvailabilityInStock": "312"
+      }
+    ]
+  }
+}

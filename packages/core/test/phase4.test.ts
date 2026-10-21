@@ -1,8 +1,16 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   addComponent,
   addZone,
+  bestOffer,
+  bomCost,
+  bomCsv,
+  bomLines,
+  bomRisks,
+  parseMouserResponse,
+  priceAt,
   fracture,
   addKeepout,
   addTrace,
@@ -151,5 +159,49 @@ describe("exact pour geometry", () => {
     addZone(doc, { net: "A", layer: "top", points: sq(5), removeIslands: false });
     addZone(doc, { net: "B", layer: "top", points: sq(10), removeIslands: false });
     expect(runDrc(getDesign(doc)).some((i) => i.code === "short" && /Pours of A and B/.test(i.message))).toBe(true);
+  });
+});
+
+describe("supplier data (Mouser)", () => {
+  const fx = (n: string) => JSON.parse(readFileSync(new URL(`./fixtures/${n}.json`, import.meta.url), "utf8"));
+
+  it("normalises search responses: stock, lifecycle, price breaks in any locale", () => {
+    const offers = parseMouserResponse(fx("mouser-partnumber"));
+    expect(offers).toHaveLength(2);
+    const best = bestOffer(offers, "RC0603FR-0710KL")!;
+    expect(best).toMatchObject({ sku: "603-RC0603FR-0710KL", stock: 1250000, lifecycle: "active", minQty: 1 });
+    expect(priceAt(best, 25)).toMatchObject({ orderQty: 25, unit: 0.013, extended: 0.33, currency: "USD" });
+    // The reel needs 5000 at a time.
+    expect(priceAt(offers[1], 25)!.orderQty).toBe(5000);
+    const ne555 = parseMouserResponse(fx("mouser-nrnd"))[0];
+    expect(ne555.lifecycle).toBe("nrnd");
+    expect(ne555.priceBreaks.map((b) => b.price)).toEqual([0.52, 0.384, 1234.5]);
+    expect(parseMouserResponse(fx("mouser-eol"))[0]).toMatchObject({ lifecycle: "eol", stock: 0 });
+    expect(() => parseMouserResponse(fx("mouser-error"))).toThrow(/Invalid unique identifier/);
+  });
+
+  it("builds a priced BOM with risks", () => {
+    const doc = newDoc();
+    const r1 = addComponent(doc, "resistor_0603", { x: 0, y: 0 }, { value: "10k" });
+    const r2 = addComponent(doc, "resistor_0603", { x: 0, y: 0 }, { value: "10k" });
+    const d1 = addComponent(doc, "led_0603", { x: 0, y: 0 });
+    for (const c of [r1, r2]) updateComponent(doc, c.id, { mpn: "RC0603FR-0710KL" });
+    updateComponent(doc, d1.id, { mpn: "APT1608EC" });
+    addComponent(doc, "resistor_0603", { x: 0, y: 0 }, { value: "1k" });
+    const d = getDesign(doc);
+    const lines = bomLines(d);
+    expect(lines.map((l) => [l.refs.join(" "), l.qty, l.mpn])).toEqual([
+      ["D1", 1, "APT1608EC"],
+      ["R1 R2", 2, "RC0603FR-0710KL"],
+      ["R3", 1, ""],
+    ]);
+    const offers = { "RC0603FR-0710KL": bestOffer(parseMouserResponse(fx("mouser-partnumber")), "RC0603FR-0710KL")!, APT1608EC: parseMouserResponse(fx("mouser-eol"))[0] };
+    expect(bomRisks(lines[0], offers.APT1608EC, 10)).toEqual(["out of stock", "end of life"]);
+    expect(bomRisks(lines[1], offers["RC0603FR-0710KL"], 10)).toEqual([]);
+    expect(bomRisks(lines[2], undefined, 10)).toEqual(["no manufacturer part number"]);
+    expect(bomCost(lines, offers, 10)).toMatchObject({ total: 2.36, priced: 2, lines: 3, currency: "USD" });
+    const csv = bomCsv(d, { offers, boards: 10 });
+    expect(csv.split("\n")[0]).toContain("Unit price");
+    expect(csv).toContain('"603-RC0603FR-0710KL","1250000","active","20","0.013","0.26","USD",""');
   });
 });
