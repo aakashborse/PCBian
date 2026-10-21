@@ -21,26 +21,29 @@ export function ShapeEl({ s, stroke, width, fill = "none" }: { s: Shape; stroke:
 
 const DIR: Record<SymbolPin["side"], [number, number]> = { left: [1, 0], right: [-1, 0], top: [0, 1], bottom: [0, -1] };
 
-export function PinEl({ pin, color, rot }: { pin: SymbolPin; color: string; rot: number }) {
+/** Counter-transform that keeps text upright and unmirrored inside a rotated/mirrored symbol. */
+const upright = (x: number, y: number, flip: boolean, mirror: boolean) => (flip || mirror ? `translate(${x} ${y}) rotate(${flip ? 180 : 0}) scale(${mirror ? -1 : 1} 1) translate(${-x} ${-y})` : undefined);
+const swapAnchor = (a: "start" | "middle" | "end", swap: boolean) => (!swap || a === "middle" ? a : a === "start" ? "end" : "start");
+
+export function PinEl({ pin, color, rot, mirror = false }: { pin: SymbolPin; color: string; rot: number; mirror?: boolean }) {
   const [dx, dy] = DIR[pin.side];
   const ex = pin.x + dx * pin.length;
   const ey = pin.y + dy * pin.length;
   const horizontal = pin.side === "left" || pin.side === "right";
-  // Keep text readable when the symbol is upside down.
+  // Keep text readable when the symbol is upside down or mirrored.
   const flip = rot === 180;
-  const t = (x: number, y: number) => (flip ? `rotate(180 ${x} ${y})` : undefined);
   const nameX = ex + dx * 4;
-  const anchorName = (dx > 0) !== flip ? "start" : "end";
+  const anchorName = swapAnchor(dx > 0 ? "start" : "end", flip !== mirror);
   return (
     <g>
       {pin.length > 0 && <line x1={pin.x} y1={pin.y} x2={ex} y2={ey} stroke={color} strokeWidth={1.2} />}
       {pin.showName && horizontal && (
-        <text x={nameX} y={ey + 3} fontSize={7.5} fill="#1f2937" textAnchor={anchorName} transform={t(nameX, ey)}>
+        <text x={nameX} y={ey + 3} fontSize={7.5} fill="#1f2937" textAnchor={anchorName} transform={upright(nameX, ey, flip, mirror)}>
           {pin.name}
         </text>
       )}
       {pin.showNumber && horizontal && (
-        <text x={(pin.x + ex) / 2} y={pin.y - 2} fontSize={6} fill="#6b7280" textAnchor="middle" transform={t((pin.x + ex) / 2, pin.y - 4)}>
+        <text x={(pin.x + ex) / 2} y={pin.y - 2} fontSize={6} fill="#6b7280" textAnchor="middle" transform={upright((pin.x + ex) / 2, pin.y - 4, flip, mirror)}>
           {pin.id}
         </text>
       )}
@@ -49,14 +52,21 @@ export function PinEl({ pin, color, rot }: { pin: SymbolPin; color: string; rot:
 }
 
 /** Schematic symbol drawn at the origin in local coordinates. */
-export function SymbolBody({ part, color, rot = 0 }: { part: PartDef; color: string; rot?: number }) {
+export function SymbolBody({ part, color, rot = 0, mirror = false }: { part: PartDef; color: string; rot?: number; mirror?: boolean }) {
+  const flip = rot === 180;
   return (
     <>
-      {part.symbol.shapes.map((s, i) => (
-        <ShapeEl key={i} s={s} stroke={color} width={1.4} fill={part.kind === "part" && s.kind === "rect" ? "#fff8e7" : "none"} />
-      ))}
+      {part.symbol.shapes.map((s, i) =>
+        s.kind === "text" ? (
+          <g key={i} transform={upright(s.x, s.y, flip, mirror)}>
+            <ShapeEl s={{ ...s, anchor: swapAnchor(s.anchor ?? "start", flip !== mirror) }} stroke={color} width={1.4} />
+          </g>
+        ) : (
+          <ShapeEl key={i} s={s} stroke={color} width={1.4} fill={part.kind === "part" || part.kind === "sheet" ? (s.kind === "rect" ? (part.kind === "sheet" ? "#eef6ff" : "#fff8e7") : "none") : "none"} />
+        ),
+      )}
       {part.symbol.pins.map((p) => (
-        <PinEl key={p.id} pin={p} color={color} rot={rot} />
+        <PinEl key={p.id} pin={p} color={color} rot={rot} mirror={mirror} />
       ))}
     </>
   );

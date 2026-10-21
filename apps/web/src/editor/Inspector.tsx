@@ -9,8 +9,19 @@ import {
   termKey,
   tracesMap,
   updateComponent,
+  busMembers,
   copperLayers,
+  deleteKeepout,
   deleteNetClass,
+  deletePcbGraphic,
+  deleteSchGraphic,
+  deleteVariant,
+  keepoutsMap,
+  schGraphicsMap,
+  setActiveVariant,
+  setTitleBlock,
+  setVariant,
+  type Keepout,
   deleteZone,
   setNetClass,
   zonesMap,
@@ -20,6 +31,7 @@ import {
 } from "@pcbian/core";
 import { useEffect, useState } from "react";
 import { useEditor } from "./context";
+import { PartEditor } from "./PartEditor";
 
 function NumField({ label, value, onChange, step = 0.05, min = 0 }: { label: string; value: number; onChange: (v: number) => void; step?: number; min?: number }) {
   const shown = String(Math.round(value * 1000) / 1000);
@@ -59,6 +71,8 @@ function TextField({ label, value, onChange }: { label: string; value: string; o
 export function Inspector() {
   const { design, selection, select, conn, nets, mode } = useEditor();
   const doc = conn.doc;
+  const [editing, setEditing] = useState<string | null>(null);
+  const variant = design.variants.find((v) => v.name === design.activeVariant);
 
   if (selection?.kind === "component") {
     const c = design.components.find((x) => x.id === selection.id);
@@ -85,14 +99,35 @@ export function Inspector() {
           </div>
         </div>
         {part.kind === "part" && <TextField label="Reference" value={c.ref} onChange={(ref) => updateComponent(doc, c.id, { ref })} />}
-        <TextField label={part.kind === "part" ? "Value" : "Net name"} value={c.value} onChange={(value) => updateComponent(doc, c.id, { value })} />
-        <div className="field">
-          <label>Fitted</label>
-          <label className="small row" style={{ gap: 6 }}>
-            <input type="checkbox" checked={!c.dnp} onChange={(e) => updateComponent(doc, c.id, { dnp: !e.target.checked })} />
-            {c.dnp ? "Do not populate" : "Populate"}
-          </label>
-        </div>
+        {variant && part.kind === "part" ? (
+          <>
+            <TextField label={`Value (${variant.name})`} value={c.value} onChange={(value) => setVariant(doc, { ...variant, values: { ...variant.values, [c.ref]: value } })} />
+            <div className="field">
+              <label>Fitted</label>
+              <label className="small row" style={{ gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={!variant.dnp.includes(c.ref)}
+                  onChange={(e) => setVariant(doc, { ...variant, dnp: e.target.checked ? variant.dnp.filter((r) => r !== c.ref) : [...variant.dnp, c.ref] })}
+                />
+                in variant {variant.name}
+              </label>
+            </div>
+          </>
+        ) : (
+          <>
+            <TextField label={part.kind === "part" ? "Value" : "Net name"} value={c.value} onChange={(value) => updateComponent(doc, c.id, { value })} />
+            {part.kind === "part" && (
+              <div className="field">
+                <label>Fitted</label>
+                <label className="small row" style={{ gap: 6 }}>
+                  <input type="checkbox" checked={!c.dnp} onChange={(e) => updateComponent(doc, c.id, { dnp: !e.target.checked })} />
+                  {c.dnp ? "Do not populate" : "Populate"}
+                </label>
+              </div>
+            )}
+          </>
+        )}
         {design.sheets.length > 1 && (
           <div className="field">
             <label>Sheet</label>
@@ -109,6 +144,10 @@ export function Inspector() {
           <div className="field">
             <label>Rotation</label>
             <button onClick={() => updateComponent(doc, c.id, { sch: { ...c.sch, rot: nextRotation(c.sch.rot) } })}>{c.sch.rot}° ↻</button>
+            <label>Mirror</label>
+            <label className="small row" style={{ gap: 6 }}>
+              <input type="checkbox" checked={Boolean(c.sch.mirror)} onChange={(e) => updateComponent(doc, c.id, { sch: { ...c.sch, mirror: e.target.checked } })} /> left-right
+            </label>
           </div>
         ) : (
           part.footprint && (
@@ -136,6 +175,7 @@ export function Inspector() {
                 <tr key={p.id}>
                   <td className="muted">{p.id}</td>
                   <td>{p.name}</td>
+                  <td className="muted" style={{ fontSize: 10 }}>{(p.type ?? "passive").replace("_", " ")}</td>
                   <td className="muted" style={{ textAlign: "right" }}>
                     {(() => {
                       const n = netOf.get(termKey({ comp: c.id, pin: p.id }));
@@ -147,15 +187,85 @@ export function Inspector() {
             </tbody>
           </table>
         )}
-        <button
-          className="danger"
-          style={{ marginTop: 12 }}
-          onClick={() => {
-            deleteComponent(doc, c.id);
-            select(null);
-          }}
-        >
-          Delete {c.ref}
+        <div className="row" style={{ marginTop: 12 }}>
+          {part.kind === "part" && <button onClick={() => setEditing(c.id)}>Edit part…</button>}
+          <button
+            className="danger"
+            onClick={() => {
+              deleteComponent(doc, c.id);
+              select(null);
+            }}
+          >
+            Delete {c.ref}
+          </button>
+        </div>
+        {editing === c.id && <PartEditor comp={c} onClose={() => setEditing(null)} />}
+      </div>
+    );
+  }
+
+  if (selection?.kind === "keepout") {
+    const k = design.keepouts.find((x) => x.id === selection.id);
+    if (!k) return <Empty />;
+    const save = (patch: Partial<Keepout>) => keepoutsMap(doc).set(k.id, { ...k, ...patch });
+    return (
+      <div className="panel-body">
+        <h4>Keepout</h4>
+        <div className="field">
+          <label>Layers</label>
+          <div className="row" style={{ flexWrap: "wrap" }}>
+            {copperLayers(design.board).map((l) => (
+              <label key={l} className="small row" style={{ gap: 3 }}>
+                <input type="checkbox" checked={k.layers.includes(l)} onChange={(e) => save({ layers: e.target.checked ? [...k.layers, l] : k.layers.filter((x) => x !== l) })} />
+                {l}
+              </label>
+            ))}
+          </div>
+        </div>
+        {(
+          [
+            ["noTracks", "No tracks"],
+            ["noVias", "No vias"],
+            ["noPours", "No pours"],
+          ] as const
+        ).map(([key, label]) => (
+          <label key={key} className="small row" style={{ gap: 6, marginBottom: 6 }}>
+            <input type="checkbox" checked={k[key]} onChange={(e) => save({ [key]: e.target.checked })} />
+            {label}
+          </label>
+        ))}
+        <button className="danger" onClick={() => (deleteKeepout(doc, k.id), select(null))}>
+          Delete keepout
+        </button>
+      </div>
+    );
+  }
+
+  if (selection?.kind === "dimension") {
+    const g = design.pcbGraphics.find((x) => x.id === selection.id);
+    if (!g) return <Empty />;
+    return (
+      <div className="panel-body">
+        <h4>Dimension</h4>
+        <p className="small">{Math.hypot(g.points[1].x - g.points[0].x, g.points[1].y - g.points[0].y).toFixed(3)} mm (shown on the assembly drawing)</p>
+        <button className="danger" onClick={() => (deletePcbGraphic(doc, g.id), select(null))}>
+          Delete dimension
+        </button>
+      </div>
+    );
+  }
+
+  if (selection?.kind === "graphic") {
+    const g = design.schGraphics.find((x) => x.id === selection.id);
+    if (!g) return <Empty />;
+    return (
+      <div className="panel-body">
+        <h4>{g.kind === "bus" ? "Bus" : g.kind === "text" ? "Note" : "Graphic"}</h4>
+        {(g.kind === "bus" || g.kind === "text") && <TextField label={g.kind === "bus" ? "Bus name" : "Text"} value={g.text ?? ""} onChange={(text) => schGraphicsMap(doc).set(g.id, { ...g, text })} />}
+        {g.kind === "bus" && <p className="muted small">Members: {busMembers(g.text ?? "").join(", ")}. Connect them with labels of the same names.</p>}
+        {g.kind === "text" && <NumField label="Size" value={g.size ?? 10} onChange={(size) => schGraphicsMap(doc).set(g.id, { ...g, size })} step={1} min={4} />}
+        <button className="danger" onClick={() => (deleteSchGraphic(doc, g.id), select(null))}>
+          Delete
         </button>
       </div>
     );
@@ -230,6 +340,23 @@ export function Inspector() {
             ))}
           </select>
         </div>
+        <div className="field">
+          <label>Pad connection</label>
+          <select value={z.padConnection ?? "thermal"} onChange={(e) => zonesMap(doc).set(z.id, { ...z, padConnection: e.target.value as "thermal" | "solid" })}>
+            <option value="thermal">Thermal relief</option>
+            <option value="solid">Solid</option>
+          </select>
+        </div>
+        {(z.padConnection ?? "thermal") === "thermal" && (
+          <>
+            <NumField label="Thermal gap" value={z.thermalGap ?? 0.5} onChange={(thermalGap) => zonesMap(doc).set(z.id, { ...z, thermalGap })} min={0.1} />
+            <NumField label="Spoke width" value={z.spokeWidth ?? 0.3} onChange={(spokeWidth) => zonesMap(doc).set(z.id, { ...z, spokeWidth })} min={0.1} />
+          </>
+        )}
+        <label className="small row" style={{ gap: 6, marginBottom: 8 }}>
+          <input type="checkbox" checked={z.removeIslands ?? true} onChange={(e) => zonesMap(doc).set(z.id, { ...z, removeIslands: e.target.checked })} />
+          Remove isolated islands
+        </label>
         <p className="muted small">Same-net pads inside the outline connect through the pour; other nets get clearance automatically. {z.points.length} outline points.</p>
         <button className="danger" onClick={() => (deleteZone(doc, z.id), select(null))}>
           Delete pour
@@ -271,8 +398,24 @@ function Empty() {
       </div>
       <NumField label="Thickness" value={b.thickness} onChange={(thickness) => set({ thickness })} step={0.1} min={0.2} />
       <NumField label="Clearance" value={b.clearance} onChange={(clearance) => set({ clearance })} min={0.05} />
+      {!b.outline && <NumField label="Corner radius" value={b.cornerRadius ?? 0} onChange={(cornerRadius) => set({ cornerRadius })} step={0.5} min={0} />}
+      {b.outline && <p className="muted small">Custom outline ({b.outline.length} points). Use PCB toolbar → Outline… to redraw or reset it.</p>}
+      {(b.cutouts?.length ?? 0) > 0 && (
+        <div className="field">
+          <label>Cutouts</label>
+          <button className="small" onClick={() => set({ cutouts: [] })}>
+            Remove {b.cutouts!.length}
+          </button>
+        </div>
+      )}
+      <label className="small row" style={{ gap: 6, marginBottom: 8 }}>
+        <input type="checkbox" checked={Boolean(b.teardrops)} onChange={(e) => set({ teardrops: e.target.checked })} />
+        Teardrops at pads and vias
+      </label>
       <NumField label="Trace width" value={b.defaultTraceWidth} onChange={(defaultTraceWidth) => set({ defaultTraceWidth })} min={0.05} />
       <NetClasses />
+      <Variants />
+      <TitleBlockCard />
       <div className="card" style={{ marginTop: 12 }}>
         <div className="kv">
           <span>Components</span>
@@ -353,6 +496,74 @@ function NetClasses() {
           <button className="primary small">Add</button>
         </form>
       )}
+    </div>
+  );
+}
+
+function Variants() {
+  const { design, conn } = useEditor();
+  const doc = conn.doc;
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="row" style={{ marginBottom: 6 }}>
+        <h4 style={{ margin: 0 }}>Variants</h4>
+        <span className="spacer" />
+        <button
+          className="small"
+          onClick={() => {
+            const name = prompt("Variant name (e.g. Lite, Pro)");
+            if (name?.trim()) setVariant(doc, { name: name.trim(), dnp: [], values: {} });
+          }}
+        >
+          + Variant
+        </button>
+      </div>
+      {design.variants.length === 0 ? (
+        <p className="muted small" style={{ margin: 0 }}>Assembly variants change which parts are fitted and their values. BOM, 3D, simulation and exports follow the active variant.</p>
+      ) : (
+        <>
+          <div className="field">
+            <label>Active</label>
+            <select value={design.activeVariant} onChange={(e) => setActiveVariant(doc, e.target.value)}>
+              <option value="">(base design)</option>
+              {design.variants.map((v) => (
+                <option key={v.name} value={v.name}>
+                  {v.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          {design.variants.map((v) => (
+            <div key={v.name} className="row small" style={{ borderTop: "1px solid var(--border)", paddingTop: 6, marginTop: 6 }}>
+              <b>{v.name}</b>
+              <span className="muted">
+                {v.dnp.length} not fitted · {Object.keys(v.values).length} value changes
+              </span>
+              <span className="spacer" />
+              <button className="ghost small danger" onClick={() => deleteVariant(doc, v.name)}>
+                Remove
+              </button>
+            </div>
+          ))}
+          <p className="muted small" style={{ marginBottom: 0 }}>Select a part while a variant is active to change its value or fitted state in that variant.</p>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TitleBlockCard() {
+  const { design, conn } = useEditor();
+  const tb = design.titleBlock;
+  const set = (k: keyof typeof tb) => (v: string) => setTitleBlock(conn.doc, { [k]: v });
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <h4>Title block</h4>
+      <TextField label="Title" value={tb.title || design.name} onChange={set("title")} />
+      <TextField label="Revision" value={tb.revision} onChange={set("revision")} />
+      <TextField label="Date" value={tb.date || new Date().toISOString().slice(0, 10)} onChange={set("date")} />
+      <TextField label="Company" value={tb.company} onChange={set("company")} />
+      <TextField label="Author" value={tb.author} onChange={set("author")} />
     </div>
   );
 }

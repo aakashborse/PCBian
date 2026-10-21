@@ -3,8 +3,8 @@
 // the AI copilot all edit the document the same way.
 import * as Y from "yjs";
 import { defaultPcbPlacement } from "./geometry";
-import { getPart, registerParts } from "./library";
-import { ALL_COPPER, type BoardSettings, type PartDef, type ComponentData, type CopperLayer, type Design, type NetClass, type PcbPlacement, type Placement, type Sheet, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
+import { getPart, icSymbol, registerParts } from "./library";
+import { ALL_COPPER, type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type ComponentData, type CopperLayer, type Design, type NetClass, type PcbPlacement, type Placement, type Sheet, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
 
 export const DEFAULT_BOARD: BoardSettings = { width: 50, height: 40, layers: 2, thickness: 1.6, clearance: 0.2, defaultTraceWidth: 0.25 };
 export const DEFAULT_SHEET: Sheet = { id: "main", name: "Sheet 1" };
@@ -21,6 +21,37 @@ export const tracesMap = (doc: Y.Doc) => doc.getMap<Trace>("traces");
 export const viasMap = (doc: Y.Doc) => doc.getMap<Via>("vias");
 export const zonesMap = (doc: Y.Doc) => doc.getMap<Zone>("zones");
 export const partsMap = (doc: Y.Doc) => doc.getMap<PartDef>("parts");
+export const keepoutsMap = (doc: Y.Doc) => doc.getMap<Keepout>("keepouts");
+export const schGraphicsMap = (doc: Y.Doc) => doc.getMap<SchGraphic>("schGraphics");
+export const pcbGraphicsMap = (doc: Y.Doc) => doc.getMap<PcbGraphic>("pcbGraphics");
+
+export const DEFAULT_TITLE: TitleBlock = { title: "", revision: "A", date: "", company: "", author: "" };
+
+/** Part id of the sheet symbol that instantiates a sheet. */
+export const sheetPartId = (sheetId: string) => `sheet:${sheetId}`;
+
+/**
+ * Sheet symbols are derived parts: one per sheet, with a pin for every hierarchical
+ * label on that sheet. They are regenerated (and registered) on every read.
+ */
+function registerSheetParts(sheets: Sheet[], comps: ComponentData[]) {
+  const first = sheets[0]?.id;
+  const parts: PartDef[] = sheets.map((sh) => {
+    const names = [...new Set(comps.filter((c) => (c.sheet ?? first) === sh.id && getPart(c.partId)?.kind === "hierlabel").map((c) => c.value.trim()))].sort();
+    const half = Math.ceil(names.length / 2);
+    const sym = icSymbol(
+      names.slice(0, half).map((n) => [n, n]),
+      names.slice(half).map((n) => [n, n]),
+      sh.name,
+    );
+    for (const p of sym.pins) {
+      p.showNumber = false;
+      p.type = "bidirectional";
+    }
+    return { id: sheetPartId(sh.id), name: `Sheet: ${sh.name}`, category: "Sheets", description: `Sheet symbol for "${sh.name}"`, kind: "sheet", refPrefix: "#S", defaultValue: sh.id, keywords: [], symbol: sym, footprint: null };
+  });
+  registerParts(parts);
+}
 
 /** Project-local parts; also registers them so getPart() can resolve them. */
 export function customParts(doc: Y.Doc): PartDef[] {
@@ -46,16 +77,29 @@ export function initDoc(doc: Y.Doc, name: string) {
 export function getDesign(doc: Y.Doc): Design {
   customParts(doc);
   const m = meta(doc);
+  const sheets = ((m.get("sheets") as Sheet[] | undefined) ?? []).length ? (m.get("sheets") as Sheet[]) : [DEFAULT_SHEET];
+  const raw = [...componentsMap(doc).values()];
+  registerSheetParts(sheets, raw);
+  const variants = (m.get("variants") as Variant[] | undefined) ?? [];
+  const activeVariant = (m.get("activeVariant") as string | undefined) ?? "";
+  const v = variants.find((x) => x.name === activeVariant);
   return {
     name: (m.get("name") as string) ?? "Untitled",
     board: { ...DEFAULT_BOARD, ...((m.get("board") as Partial<BoardSettings>) ?? {}) },
-    components: [...componentsMap(doc).values()],
+    // The active variant overlays fitted state and values (the stored component keeps the base data).
+    components: v ? raw.map((c) => ({ ...c, dnp: c.dnp || v.dnp.includes(c.ref), value: v.values[c.ref] ?? c.value })) : raw,
     wires: [...wiresMap(doc).values()],
     traces: [...tracesMap(doc).values()],
     vias: [...viasMap(doc).values()],
     zones: [...zonesMap(doc).values()],
-    sheets: ((m.get("sheets") as Sheet[] | undefined) ?? []).length ? (m.get("sheets") as Sheet[]) : [DEFAULT_SHEET],
+    sheets,
     netClasses: (m.get("netClasses") as NetClass[] | undefined) ?? [],
+    keepouts: [...keepoutsMap(doc).values()],
+    schGraphics: [...schGraphicsMap(doc).values()],
+    pcbGraphics: [...pcbGraphicsMap(doc).values()],
+    titleBlock: { ...DEFAULT_TITLE, ...((m.get("titleBlock") as Partial<TitleBlock>) ?? {}) },
+    variants,
+    activeVariant: v ? activeVariant : "",
   };
 }
 
@@ -170,6 +214,8 @@ export const deleteZone = (doc: Y.Doc, id: string) => zonesMap(doc).delete(id);
 
 /** Rectangle covering the whole board, inset from the edge. */
 export function boardOutlineZone(board: BoardSettings, inset = 0.5): Vec[] {
+  // Shaped boards: pour the outline itself; the fill keeps its own clearance from the edge.
+  if ((board.outline && board.outline.length >= 3) || (board.cornerRadius ?? 0) > 0) return boardOutline(board);
   return [
     { x: inset, y: inset },
     { x: board.width - inset, y: inset },
@@ -324,3 +370,89 @@ export function chatView(entry: Y.Map<unknown>): ChatEntryView {
     ts: entry.get("ts") as number,
   };
 }
+
+// ---------- schematic graphics, title block ----------
+
+export function addSchGraphic(doc: Y.Doc, g: Omit<SchGraphic, "id">): SchGraphic {
+  const gr = { ...g, id: uid("g") };
+  schGraphicsMap(doc).set(gr.id, gr);
+  return gr;
+}
+export const deleteSchGraphic = (doc: Y.Doc, id: string) => schGraphicsMap(doc).delete(id);
+
+export function setTitleBlock(doc: Y.Doc, patch: Partial<TitleBlock>) {
+  meta(doc).set("titleBlock", { ...DEFAULT_TITLE, ...((meta(doc).get("titleBlock") as Partial<TitleBlock>) ?? {}), ...patch });
+}
+
+/** Expand a bus name: "D[0..7]" -> D0..D7, "{SDA SCL}" -> SDA, SCL, "A[3..0]" counts down. */
+export function busMembers(name: string): string[] {
+  const t = name.trim();
+  const group = t.match(/^\{(.+)\}$/);
+  if (group) return group[1].split(/[\s,]+/).filter(Boolean);
+  const r = t.match(/^(.*)\[(\d+)\.\.(\d+)\]$/);
+  if (!r) return [t];
+  const a = Number(r[2]);
+  const b = Number(r[3]);
+  const out: string[] = [];
+  for (let i = a; a <= b ? i <= b : i >= b; i += a <= b ? 1 : -1) out.push(`${r[1]}${i}`);
+  return out;
+}
+
+// ---------- board outline, keepouts, PCB graphics ----------
+
+/** Board outline polygon: custom outline, or the width x height rectangle with optional rounded corners. */
+export function boardOutline(board: BoardSettings): Vec[] {
+  if (board.outline && board.outline.length >= 3) return board.outline;
+  const { width: W, height: H } = board;
+  const r = Math.min(board.cornerRadius ?? 0, W / 2, H / 2);
+  if (r <= 0) return [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }];
+  const pts: Vec[] = [];
+  const corner = (cx: number, cy: number, a0: number) => {
+    for (let i = 0; i <= 8; i++) {
+      const a = a0 + (Math.PI / 2) * (i / 8);
+      pts.push({ x: Math.round((cx + r * Math.cos(a)) * 1e4) / 1e4, y: Math.round((cy + r * Math.sin(a)) * 1e4) / 1e4 });
+    }
+  };
+  corner(W - r, r, -Math.PI / 2);
+  corner(W - r, H - r, 0);
+  corner(r, H - r, Math.PI / 2);
+  corner(r, r, Math.PI);
+  return pts;
+}
+
+/** Set a custom board outline; width/height become its bounding box (outline shifted to start at 0,0). */
+export function setBoardOutline(doc: Y.Doc, outline: Vec[] | null) {
+  if (!outline) return setBoard(doc, { outline: undefined });
+  const x0 = Math.min(...outline.map((p) => p.x));
+  const y0 = Math.min(...outline.map((p) => p.y));
+  const pts = outline.map((p) => ({ x: p.x - x0, y: p.y - y0 }));
+  setBoard(doc, { outline: pts, width: Math.max(...pts.map((p) => p.x)), height: Math.max(...pts.map((p) => p.y)) });
+}
+
+export function addKeepout(doc: Y.Doc, k: Omit<Keepout, "id">): Keepout {
+  const ko = { ...k, id: uid("k") };
+  keepoutsMap(doc).set(ko.id, ko);
+  return ko;
+}
+export const deleteKeepout = (doc: Y.Doc, id: string) => keepoutsMap(doc).delete(id);
+
+export function addPcbGraphic(doc: Y.Doc, g: Omit<PcbGraphic, "id">): PcbGraphic {
+  const gr = { ...g, id: uid("d") };
+  pcbGraphicsMap(doc).set(gr.id, gr);
+  return gr;
+}
+export const deletePcbGraphic = (doc: Y.Doc, id: string) => pcbGraphicsMap(doc).delete(id);
+
+// ---------- variants ----------
+
+export function setVariant(doc: Y.Doc, v: Variant) {
+  const list = ((meta(doc).get("variants") as Variant[] | undefined) ?? []).filter((x) => x.name !== v.name);
+  meta(doc).set("variants", [...list, v]);
+}
+
+export function deleteVariant(doc: Y.Doc, name: string) {
+  meta(doc).set("variants", ((meta(doc).get("variants") as Variant[] | undefined) ?? []).filter((x) => x.name !== name));
+  if (meta(doc).get("activeVariant") === name) meta(doc).set("activeVariant", "");
+}
+
+export const setActiveVariant = (doc: Y.Doc, name: string) => meta(doc).set("activeVariant", name);

@@ -190,3 +190,16 @@ export function usbC(): Footprint {
 export function hc49(): Footprint {
   return tht2("Crystal_HC49-U_Vertical", 4.88, 11, 4.6, 0.8);
 }
+
+export function mountingHole(drill: number, pad: number): Footprint {
+  return {
+    name: `MountingHole_${drill}mm_Pad`,
+    pads: [{ id: "1", x: 0, y: 0, w: pad, h: pad, shape: "circle", drill }],
+    courtyard: { w: pad + 0.5, h: pad + 0.5 },
+    silk: [{ kind: "circle", x: 0, y: 0, r: pad / 2 + 0.3 }],
+  };
+}
+
+export function fiducial(): Footprint {
+  return { name: "Fiducial_1mm_Mask2mm", pads: [{ id: "1", x: 0, y: 0, w: 1, h: 1, shape: "circle" }], courtyard: { w: 2.5, h: 2.5 }, silk: [] };
+}

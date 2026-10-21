@@ -11,6 +11,8 @@ const SUGGESTIONS = [
   "Simulate the circuit and check LED currents",
   "Lay out and route the board, then make it pass DRC",
   "Convert this board to 4 layers with GND and power planes",
+  "Split the schematic into hierarchical sheets for power and logic",
+  "Run a transient simulation and tell me the oscillator frequency",
 ];
 
 /** Minimal, safe Markdown: paragraphs, bullet/numbered lists, **bold** and `code`. */

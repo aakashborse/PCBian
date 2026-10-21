@@ -48,18 +48,37 @@ export function disconnectPin(doc: Y.Doc, spec: string): number {
 
 const SIDE_DIR: Record<string, Vec> = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, top: { x: 0, y: -1 }, bottom: { x: 0, y: 1 } };
 
-/** Drop a power symbol (or net label) next to a pin and wire it up. */
-export function attachNet(doc: Y.Doc, spec: string, net: string): ComponentData {
+const isPowerName = (n: string) => /^(A|D|P)?GND|^VSS$|^[+-]?\d+(\.\d+)?V\d*$|^[+-]?\d+V\d+$|^V(CC|DD|BUS|IN|BAT|SYS)\b|^\+/i.test(n.trim());
+
+export type LabelScope = "auto" | "power" | "global" | "local" | "hierarchical";
+
+/**
+ * Drop a power symbol or label next to a pin and wire it up. "auto" uses a power symbol for
+ * supply-looking names (GND, +3V3, VBUS...) and a global label for anything else.
+ */
+export function attachNet(doc: Y.Doc, spec: string, net: string, scope: LabelScope = "auto"): ComponentData {
   const t = resolveTerminal(doc, spec);
   const comp = componentsMap(doc).get(t.comp)!;
   const pin = schematicPins(comp).find((p) => p.id === t.pin)!;
   const isGnd = /^(A|D|P)?GND/i.test(net) || /^VSS/i.test(net);
-  const partId = isGnd ? "power_gnd" : "power_rail";
+  const kind = scope === "auto" ? (isPowerName(net) ? "power" : "global") : scope;
+  const partId = kind === "power" ? (isGnd ? "power_gnd" : "power_rail") : kind === "global" ? "net_label" : kind === "local" ? "local_label" : "hier_label";
+  // schematicPins() already reports the side after mirroring; rotate it into world space.
   const dir = rotateDir(SIDE_DIR[pin.side], comp.sch.rot);
-  const at = { x: pin.world.x + dir.x * 20, y: pin.world.y + dir.y * 20 + (dir.y === 0 ? (isGnd ? 20 : -20) : 0) };
-  const sym = addComponent(doc, partId, { x: Math.round(at.x / 10) * 10, y: Math.round(at.y / 10) * 10 }, { value: net });
+  const at =
+    kind === "power"
+      ? { x: pin.world.x + dir.x * 20, y: pin.world.y + dir.y * 20 + (dir.y === 0 ? (isGnd ? 20 : -20) : 0) }
+      : { x: pin.world.x + dir.x * 20, y: pin.world.y + dir.y * 20 };
+  // Labels point away from the part: mirror them when they sit on the left of the pin.
+  const sym = addComponent(doc, partId, { x: Math.round(at.x / 10) * 10, y: Math.round(at.y / 10) * 10 }, { value: net, sheet: comp.sheet });
+  if (kind !== "power" && dir.x < 0) updateMirror(doc, sym.id);
   addWire(doc, t, { comp: sym.id, pin: "1" });
   return sym;
+}
+
+function updateMirror(doc: Y.Doc, id: string) {
+  const c = componentsMap(doc).get(id)!;
+  componentsMap(doc).set(id, { ...c, sch: { ...c.sch, mirror: true } });
 }
 
 function rotateDir(d: Vec, rot: number): Vec {

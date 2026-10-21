@@ -1,14 +1,149 @@
 // Auto-placement and a multi-layer, net-class-aware grid A* auto-router.
 import { analyzeCopper, ratsnest } from "./copper";
-import { courtyardRect, padRect, pointSegmentDistance, segmentRectDistance, type WorldPad } from "./geometry";
+import { courtyardRect, padRect, pointInPolygon, pointSegmentDistance, polygonSpans, segmentRectDistance, type Rect, type WorldPad } from "./geometry";
 import { getPart } from "./library";
-import { copperLayers, netRules } from "./doc";
-import type { CopperLayer, Design, PcbPlacement, Trace, Vec } from "./types";
+import { boardOutline, copperLayers, netRules } from "./doc";
+import { computeNets } from "./netlist";
+import type { ComponentData, CopperLayer, Design, PcbPlacement, Trace, Vec } from "./types";
 
 // ---------- auto-placement ----------
 
+export interface PlaceOptions {
+  /** "cluster" (default) places parts by connectivity; "pack" shelf-packs them. */
+  mode?: "cluster" | "pack";
+  margin?: number;
+  spacing?: number;
+}
+
+/** Auto-place footprints onto the board. */
+export function autoPlace(design: Design, opts: PlaceOptions = {}): { placements: Map<string, PcbPlacement>; fits: boolean } {
+  return (opts.mode ?? "cluster") === "pack" ? packPlace(design, opts.margin ?? 2, opts.spacing ?? 2) : clusterPlace(design, opts.margin ?? 1.5, opts.spacing ?? 1.2);
+}
+
+const isPowerNet = (name: string) => /^(A|D|P)?GND|^VSS$|^[+-]|^V(CC|DD|BUS|IN|BAT|SYS)\b|^\d+V\d*$/i.test(name.trim());
+
+/**
+ * Connectivity-driven placement: connectors on board edges, decoupling capacitors next to
+ * the IC they serve, and every other part where it minimises weighted wire length to the
+ * parts already placed.
+ */
+function clusterPlace(design: Design, margin: number, spacing: number): { placements: Map<string, PcbPlacement>; fits: boolean } {
+  const W = design.board.width;
+  const H = design.board.height;
+  const outline = boardOutline(design.board);
+  const holes = design.board.cutouts ?? [];
+  const inside = (p: Vec) => pointInPolygon(p, outline) && !holes.some((h) => pointInPolygon(p, h));
+  const parts = design.components.filter((c) => getPart(c.partId)?.footprint);
+  const size = new Map(parts.map((c) => {
+    const r = courtyardRect({ ...c, pcb: { ...c.pcb, x: 0, y: 0 } })!;
+    return [c.id, { w: r.x1 - r.x0, h: r.y1 - r.y0 }];
+  }));
+  const pinCount = (id: string) => getPart(parts.find((c) => c.id === id)!.partId)!.symbol.pins.length;
+
+  // Pairwise attraction weights.
+  const weight = new Map<string, Map<string, number>>();
+  const addW = (a: string, b: string, w: number) => {
+    if (a === b || w <= 0) return;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!weight.has(x)) weight.set(x, new Map());
+      weight.get(x)!.set(y, (weight.get(x)!.get(y) ?? 0) + w);
+    }
+  };
+  const ids = new Set(parts.map((c) => c.id));
+  const nets = computeNets(design);
+  const netsOf = new Map<string, Set<string>>();
+  for (const n of nets) {
+    const comps = [...new Set(n.terminals.map((t) => t.comp).filter((c) => ids.has(c)))];
+    for (const c of comps) {
+      if (!netsOf.has(c)) netsOf.set(c, new Set());
+      netsOf.get(c)!.add(n.name);
+    }
+    if (comps.length < 2 || comps.length > 12 || isPowerNet(n.name)) continue;
+    const w = 1 / (comps.length - 1);
+    for (let i = 0; i < comps.length; i++) for (let j = i + 1; j < comps.length; j++) addW(comps[i], comps[j], w);
+  }
+  // Decoupling: a 2-pin part between two power nets hugs the IC with most pins on its supply net.
+  for (const c of parts) {
+    const ns = [...(netsOf.get(c.id) ?? [])];
+    if (pinCount(c.id) !== 2 || ns.length !== 2 || !ns.every(isPowerNet)) continue;
+    const supply = ns.find((n) => !/GND|VSS/i.test(n)) ?? ns[0];
+    const net = nets.find((n) => n.name === supply)!;
+    const counts = new Map<string, number>();
+    for (const t of net.terminals) if (ids.has(t.comp) && t.comp !== c.id && pinCount(t.comp) >= 4) counts.set(t.comp, (counts.get(t.comp) ?? 0) + 1);
+    const ic = [...counts].sort((a, b) => b[1] - a[1])[0]?.[0];
+    if (ic) addW(c.id, ic, 4);
+  }
+
+  const placements = new Map<string, PcbPlacement>();
+  const rects: Rect[] = [];
+  const fitsAt = (id: string, x: number, y: number) => {
+    const { w, h } = size.get(id)!;
+    const r = { x0: x - w / 2, y0: y - h / 2, x1: x + w / 2, y1: y + h / 2 };
+    const m = { x0: r.x0 - margin, y0: r.y0 - margin, x1: r.x1 + margin, y1: r.y1 + margin };
+    if (![{ x: m.x0, y: m.y0 }, { x: m.x1, y: m.y0 }, { x: m.x1, y: m.y1 }, { x: m.x0, y: m.y1 }].every(inside)) return null;
+    for (const o of rects) if (r.x0 < o.x1 + spacing && o.x0 < r.x1 + spacing && r.y0 < o.y1 + spacing && o.y0 < r.y1 + spacing) return null;
+    return r;
+  };
+  const place = (c: ComponentData, x: number, y: number) => {
+    const r = fitsAt(c.id, x, y)!;
+    rects.push(r);
+    placements.set(c.id, { x: Math.round(x * 20) / 20, y: Math.round(y * 20) / 20, rot: c.pcb.rot, side: c.pcb.side });
+  };
+  const step = Math.max(0.5, Math.min(W, H) / 80);
+
+  // Connectors on the edges: left, right, top, bottom in turn.
+  const connectors = parts.filter((c) => /^(J|P|CN|USB|X)\d/i.test(c.ref)).sort((a, b) => a.sch.x - b.sch.x);
+  connectors.forEach((c, i) => {
+    const { w, h } = size.get(c.id)!;
+    const edge = i % 4;
+    const along: Vec[] = [];
+    for (let t = 0.5; t > 0.05; t -= 0.05) for (const u of t === 0.5 ? [0.5] : [t, 1 - t]) along.push({ x: u, y: u });
+    for (const u of along) {
+      const x = edge === 0 ? margin + w / 2 : edge === 1 ? W - margin - w / 2 : u.x * W;
+      const y = edge === 2 ? margin + h / 2 : edge === 3 ? H - margin - h / 2 : u.y * H;
+      if (fitsAt(c.id, x, y)) {
+        place(c, x, y);
+        break;
+      }
+    }
+  });
+
+  const total = (id: string) => [...(weight.get(id)?.values() ?? [])].reduce((a, b) => a + b, 0);
+  const rest = parts.filter((c) => !placements.has(c.id)).sort((a, b) => total(b.id) - total(a.id) || size.get(b.id)!.w * size.get(b.id)!.h - size.get(a.id)!.w * size.get(a.id)!.h);
+  let fits = true;
+  while (rest.length) {
+    // Next: the part most strongly connected to what is already placed.
+    let bi = 0;
+    let bw = -1;
+    rest.forEach((c, i) => {
+      let w = 0;
+      for (const [o, ww] of weight.get(c.id) ?? []) if (placements.has(o)) w += ww;
+      if (w > bw) (bw = w), (bi = i);
+    });
+    const c = rest.splice(bi, 1)[0];
+    const links = [...(weight.get(c.id) ?? [])].filter(([o]) => placements.has(o)).map(([o, w]) => ({ p: placements.get(o)!, w }));
+    const placedPts = [...placements.values()];
+    const centroid = placedPts.length ? { x: placedPts.reduce((a, p) => a + p.x, 0) / placedPts.length, y: placedPts.reduce((a, p) => a + p.y, 0) / placedPts.length } : { x: W / 2, y: H / 2 };
+    let best: { x: number; y: number; cost: number } | null = null;
+    for (let y = margin; y <= H - margin; y += step) {
+      for (let x = margin; x <= W - margin; x += step) {
+        if (!fitsAt(c.id, x, y)) continue;
+        let cost = links.length ? links.reduce((a, l) => a + l.w * (Math.abs(l.p.x - x) + Math.abs(l.p.y - y)), 0) : 0;
+        cost += 0.05 * (Math.abs(centroid.x - x) + Math.abs(centroid.y - y));
+        if (!best || cost < best.cost) best = { x, y, cost };
+      }
+    }
+    if (best) place(c, best.x, best.y);
+    else {
+      fits = false;
+      placements.set(c.id, { ...c.pcb });
+    }
+  }
+  return { placements, fits };
+}
+
 /** Shelf-pack all footprints onto the board, keeping roughly the schematic's left-to-right order. */
-export function autoPlace(design: Design, margin = 2, spacing = 2): { placements: Map<string, PcbPlacement>; fits: boolean } {
+function packPlace(design: Design, margin: number, spacing: number): { placements: Map<string, PcbPlacement>; fits: boolean } {
   const parts = design.components
     .filter((c) => getPart(c.partId)?.footprint)
     .sort((a, b) => a.sch.y - b.sch.y || a.sch.x - b.sch.x);
@@ -208,6 +343,55 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     }
   }
 
+  // Board edge distance field (custom outlines, cutouts): -1 outside the board, else distance to the nearest edge.
+  const outline = boardOutline(design.board);
+  const holes = design.board.cutouts ?? [];
+  const edgeD = new Float32Array(N).fill(-1);
+  for (let gy = 0; gy < H; gy++) {
+    const y = gy * res;
+    const spans = polygonSpans(outline, y);
+    const holeSpans = holes.flatMap((h) => polygonSpans(h, y));
+    for (const [a, b] of spans) {
+      for (let gx = Math.max(0, Math.ceil(a / res)); gx <= Math.min(W - 1, Math.floor(b / res)); gx++) {
+        const x = gx * res;
+        if (!holeSpans.some(([c, d]) => x >= c && x <= d)) edgeD[gy * W + gx] = Infinity;
+      }
+    }
+  }
+  const EDGE_R = 0.3 + maxHalf + 2 * res;
+  for (const poly of [outline, ...holes]) {
+    for (let k = 0; k < poly.length; k++) {
+      const a = poly[k];
+      const b = poly[(k + 1) % poly.length];
+      const gx0 = Math.max(0, Math.floor((Math.min(a.x, b.x) - EDGE_R) / res));
+      const gx1 = Math.min(W - 1, Math.ceil((Math.max(a.x, b.x) + EDGE_R) / res));
+      const gy0 = Math.max(0, Math.floor((Math.min(a.y, b.y) - EDGE_R) / res));
+      const gy1 = Math.min(H - 1, Math.ceil((Math.max(a.y, b.y) + EDGE_R) / res));
+      for (let gy = gy0; gy <= gy1; gy++) {
+        for (let gx = gx0; gx <= gx1; gx++) {
+          const i = gy * W + gx;
+          if (edgeD[i] < 0) continue;
+          const d = pointSegmentDistance({ x: gx * res, y: gy * res }, a, b);
+          if (d < edgeD[i]) edgeD[i] = d;
+        }
+      }
+    }
+  }
+  // Keepouts: no-tracks areas behave like foreign copper; no-vias areas are flagged per cell.
+  const noVia = new Uint8Array(N);
+  for (const k of design.keepouts) {
+    const xs = k.points.map((p) => p.x);
+    const ys = k.points.map((p) => p.y);
+    const bbox = { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+    const dist = (p: Vec) => (pointInPolygon(p, k.points) ? -1 : Math.min(...k.points.map((q, i) => pointSegmentDistance(p, q, k.points[(i + 1) % k.points.length]))));
+    if (k.noTracks) for (const l of k.layers) if (layers.includes(l)) stamp(layers.indexOf(l), -2, bbox, dist, 0);
+    if (k.noVias) {
+      for (let gy = Math.max(0, Math.floor(bbox.y0 / res) - 2); gy <= Math.min(H - 1, Math.ceil(bbox.y1 / res) + 2); gy++) {
+        for (let gx = Math.max(0, Math.floor(bbox.x0 / res) - 2); gx <= Math.min(W - 1, Math.ceil(bbox.x1 / res) + 2); gx++) if (dist({ x: gx * res, y: gy * res }) < maxHalf) noVia[gy * W + gx] = 1;
+      }
+    }
+  }
+
   const result: RouteResult = { traces: [], vias: [], routed: 0, failed: [] };
   const lines = ratsnest(design, analysis)
     .filter((l) => !opts.nets || opts.nets.includes(l.net))
@@ -245,10 +429,10 @@ export function autoRoute(design: Design, opts: RouteOptions = {}): RouteResult 
     const bx = Math.round(line.b.x / res);
     const by = Math.round(line.b.y / res);
     const clearOf = (l: number, i: number) => (n1[l][i] === net ? d2[l][i] : d1[l][i]);
-    const edgeOk = (gx: number, gy: number, e: number) => gx * res >= e && gy * res >= e && (W - 1 - gx) * res >= e && (H - 1 - gy) * res >= e;
+    const edgeOk = (gx: number, gy: number, e: number) => edgeD[gy * W + gx] >= e;
     const ok = (l: number, gx: number, gy: number) => clearOf(l, gy * W + gx) >= need && edgeOk(gx, gy, edge);
     const viaOk = (gx: number, gy: number) => {
-      if (!edgeOk(gx, gy, edgeVia)) return false;
+      if (!edgeOk(gx, gy, edgeVia) || noVia[gy * W + gx]) return false;
       for (let l = 0; l < L; l++) if (clearOf(l, gy * W + gx) < needVia) return false;
       return true;
     };

@@ -4,7 +4,7 @@ import { analyzeCopper } from "./copper";
 import { copperLayers, netRules } from "./doc";
 import { icSymbol, getPart } from "./library";
 import { computeNets, netByTerminal, termKey } from "./netlist";
-import type { CopperLayer, Design, Footprint, Pad, PartDef, PartSymbol, Shape, SymbolPin, Vec } from "./types";
+import type { CopperLayer, Design, Footprint, Pad, PartDef, PartSymbol, PinType, Shape, SymbolPin, Vec } from "./types";
 
 // ---------- S-expressions ----------
 
@@ -131,6 +131,26 @@ export function importKicadSymbol(text: string, symbolName?: string): { name: st
   if (head(root) === "symbol") syms = [root as SExpr[]];
   const sym = symbolName ? syms.find((s) => s[1] === symbolName) : syms[0];
   if (!sym) throw new Error("No symbol found in the KiCad file");
+  return symbolFromSExpr(sym);
+}
+
+const KTYPE: Record<string, PinType> = {
+  input: "input",
+  output: "output",
+  bidirectional: "bidirectional",
+  tri_state: "tristate",
+  passive: "passive",
+  free: "passive",
+  unspecified: "unspecified",
+  power_in: "power_in",
+  power_out: "power_out",
+  open_collector: "open_collector",
+  open_emitter: "open_collector",
+  no_connect: "nc",
+};
+
+/** Convert a KiCad symbol definition (lib_symbols entry or .kicad_sym symbol). Units are merged; De Morgan body 2 is skipped. */
+export function symbolFromSExpr(sym: SExpr[]): { name: string; refPrefix: string; value: string; description: string; symbol: PartSymbol; pins: { id: string; name: string }[]; power: boolean } {
   const props = new Map(children(sym, "property").map((p) => [p[1] as string, p[2] as string]));
   const k = 10 / 2.54;
   const pins: SymbolPin[] = [];
@@ -143,7 +163,8 @@ export function importKicadSymbol(text: string, symbolName?: string): { name: st
       const side: SymbolPin["side"] = ang === 0 ? "left" : ang === 180 ? "right" : ang === 90 ? "bottom" : "top";
       const name = (child(p, "name")?.[1] as string) ?? "";
       const number = (child(p, "number")?.[1] as string) ?? "";
-      pins.push({ id: number, name: name === "~" ? number : name, x: Math.round(num(at, 1) * k), y: Math.round(-num(at, 2) * k), side, length: Math.round(len * k), showName: name !== "~", showNumber: true });
+      if (pins.some((x) => x.id === number)) continue;
+      pins.push({ id: number, name: name === "~" || name === "" ? number : name, x: Math.round(num(at, 1) * k), y: Math.round(-num(at, 2) * k), side, length: Math.round(len * k), showName: name !== "~", showNumber: true, type: KTYPE[p[1] as string] ?? "passive" });
     }
     for (const r of children(e, "rectangle")) {
       const a = child(r, "start");
@@ -159,7 +180,8 @@ export function importKicadSymbol(text: string, symbolName?: string): { name: st
       if (pts.length > 1) shapes.push({ kind: "line", points: pts });
     }
     for (const c of children(e, "circle")) shapes.push({ kind: "circle", x: num(child(c, "center"), 1) * k, y: -num(child(c, "center"), 2) * k, r: num(child(c, "radius"), 1) * k });
-    for (const sub of children(e, "symbol")) walk(sub);
+    // Sub-symbols are named NAME_unit_style; skip alternate (De Morgan) body styles.
+    for (const sub of children(e, "symbol")) if (!/_\d+_2$/.test(String(sub[1]))) walk(sub);
   };
   walk(sym);
   if (!pins.length) throw new Error("Symbol has no pins");
@@ -179,6 +201,7 @@ export function importKicadSymbol(text: string, symbolName?: string): { name: st
     description: props.get("Description") ?? props.get("ki_description") ?? "",
     symbol: { shapes: shapes.length ? shapes : icSymbol(pins.map((p) => [p.id, p.name]), []).shapes, pins, refPos: { x: 0, y: minY - 8 }, valuePos: { x: 0, y: Math.max(...ys) + 16 } },
     pins: pins.map((p) => ({ id: p.id, name: p.name })),
+    power: children(sym, "power").length > 0,
   };
 }
 

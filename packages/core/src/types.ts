@@ -23,6 +23,9 @@ export type Shape =
 
 export type PinSide = "left" | "right" | "top" | "bottom";
 
+/** Electrical pin type, used by the ERC pin-conflict matrix (KiCad/Altium style). */
+export type PinType = "input" | "output" | "bidirectional" | "tristate" | "passive" | "power_in" | "power_out" | "open_collector" | "unspecified" | "nc";
+
 export interface SymbolPin {
   /** Pin number, matches the footprint pad id. */
   id: string;
@@ -35,6 +38,8 @@ export interface SymbolPin {
   length: number;
   showName: boolean;
   showNumber: boolean;
+  /** Electrical type; missing means passive. */
+  type?: PinType;
 }
 
 export interface PartSymbol {
@@ -66,7 +71,12 @@ export interface Footprint {
   silk: Shape[];
 }
 
-export type PartKind = "part" | "power" | "netlabel";
+/**
+ * part: physical component · power: global power symbol · netlabel: global label ·
+ * locallabel: label scoped to its sheet · hierlabel: hierarchical port of its sheet ·
+ * sheet: sheet symbol that instantiates a child sheet (pins = the child's hierarchical labels).
+ */
+export type PartKind = "part" | "power" | "netlabel" | "locallabel" | "hierlabel" | "sheet";
 
 export interface PartDef {
   id: string;
@@ -87,6 +97,8 @@ export interface Placement {
   x: number;
   y: number;
   rot: Rotation;
+  /** Schematic only: mirror the symbol left-right before rotating. */
+  mirror?: boolean;
 }
 
 export interface PcbPlacement extends Placement {
@@ -113,6 +125,50 @@ export interface Sheet {
   name: string;
 }
 
+/** Schematic graphics: free text, lines, rectangles and buses (a bus is a named, thick polyline). */
+export interface SchGraphic {
+  id: string;
+  sheet: string;
+  kind: "text" | "line" | "rect" | "bus";
+  points: Vec[];
+  text?: string;
+  size?: number;
+}
+
+/** PCB graphics: dimensions and free text on the fab/assembly drawing. */
+export interface PcbGraphic {
+  id: string;
+  kind: "dimension" | "text";
+  points: Vec[];
+  text?: string;
+}
+
+export interface TitleBlock {
+  title: string;
+  revision: string;
+  date: string;
+  company: string;
+  author: string;
+}
+
+export interface Keepout {
+  id: string;
+  /** Layers the keepout applies to. */
+  layers: CopperLayer[];
+  points: Vec[];
+  noTracks: boolean;
+  noVias: boolean;
+  noPours: boolean;
+}
+
+export interface Variant {
+  name: string;
+  /** References not fitted in this variant. */
+  dnp: string[];
+  /** Value overrides by reference. */
+  values: Record<string, string>;
+}
+
 export interface Zone {
   id: string;
   net: string;
@@ -121,6 +177,12 @@ export interface Zone {
   points: Vec[];
   /** Higher priority zones win where zones overlap (reserved for future use). */
   priority?: number;
+  /** How same-net pads join the pour (default thermal). */
+  padConnection?: "thermal" | "solid";
+  thermalGap?: number;
+  spokeWidth?: number;
+  /** Remove fill islands not connected to the zone's net (default true). */
+  removeIslands?: boolean;
 }
 
 export interface NetClass {
@@ -171,6 +233,14 @@ export interface BoardSettings {
   /** Minimum copper-to-copper clearance used by DRC (mm). */
   clearance: number;
   defaultTraceWidth: number;
+  /** Optional custom outline polygon (mm); when absent the board is a width x height rectangle. */
+  outline?: Vec[];
+  /** Corner radius for the rectangular outline (mm). */
+  cornerRadius?: number;
+  /** Internal cutouts / slots (polygons, mm). */
+  cutouts?: Vec[][];
+  /** Add teardrops where traces meet pads and vias. */
+  teardrops?: boolean;
 }
 
 /** Plain-object snapshot of a project's design document. */
@@ -184,6 +254,13 @@ export interface Design {
   zones: Zone[];
   sheets: Sheet[];
   netClasses: NetClass[];
+  keepouts: Keepout[];
+  schGraphics: SchGraphic[];
+  pcbGraphics: PcbGraphic[];
+  titleBlock: TitleBlock;
+  variants: Variant[];
+  /** Active variant name; "" means the base design. */
+  activeVariant: string;
 }
 
 export interface Net {

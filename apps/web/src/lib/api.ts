@@ -30,6 +30,8 @@ export const api = {
   projects: () => call<ProjectMeta[]>("GET", "/api/projects"),
   project: (id: string) => call<ProjectMeta>("GET", `/api/projects/${id}`),
   create: (name: string, template: string) => call<ProjectMeta>("POST", "/api/projects", { name, template }),
+  importKicad: (name: string, schematics: { name: string; text: string }[], pcb?: string) =>
+    call<ProjectMeta & { report: { components: number; nets: number; sheets: number; traces: number; vias: number; zones: number; warnings: string[] } }>("POST", "/api/projects/import", { name, schematics, pcb }),
   rename: (id: string, name: string) => call<ProjectMeta>("PATCH", `/api/projects/${id}`, { name }),
   remove: (id: string) => call<void>("DELETE", `/api/projects/${id}`),
   ask: (id: string, message: string, author: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot`, { message, author }),

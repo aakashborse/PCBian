@@ -7,7 +7,16 @@ import {
   deleteZone,
   netRules,
   pointInPolygon,
-  zoneCutouts,
+  zoneFill,
+  boardOutline,
+  boardTeardrops,
+  addKeepout,
+  deleteKeepout,
+  addPcbGraphic,
+  deletePcbGraphic,
+  setBoard,
+  setBoardOutline,
+  type Cutout,
   analyzeCopper,
   autoPlace,
   autoRoute,
@@ -34,14 +43,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
 import { publishCursor, type PresenceState } from "./presence";
 import { ShapeEl } from "./render";
-import { beginPan, useViewport } from "./viewport";
+import { beginPan, dedupe, useViewport } from "./viewport";
 
 export const LAYER_COLOR: Record<CopperLayer, string> = { top: "#d9534f", in1: "#d98b2b", in2: "#2fb39a", bottom: "#4a7fe0" };
 const PAD_COLOR: Record<CopperLayer | "tht", string> = { top: "#e0a83a", in1: "#d98b2b", in2: "#2fb39a", bottom: "#4f8fe6", tht: "#d9a53a" };
 const LAYER_NAME: Record<CopperLayer, string> = { top: "Top", in1: "Inner 1", in2: "Inner 2", bottom: "Bottom" };
 const SNAP = 0.05;
 
-type Tool = "select" | "route" | "via" | "zone";
+type Tool = "select" | "route" | "via" | "zone" | "keepout" | "outline" | "cutout" | "measure";
+const POLY_TOOLS: Tool[] = ["zone", "keepout", "outline", "cutout"];
 
 interface Routing {
   layer: CopperLayer;
@@ -73,6 +83,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
   const [cursor, setCursor] = useState<Vec>({ x: 0, y: 0 });
   const [show, setShow] = useState({ top: true, in1: true, in2: true, bottom: true, zones: true, silk: true, rats: true, drc: true });
   const [zoneDraft, setZoneDraft] = useState<Vec[] | null>(null);
+  const [measure, setMeasure] = useState<Vec | null>(null);
   const layers = copperLayers(design.board);
   const namedNets = useMemo(() => nets.filter((n) => n.terminals.length > 1).map((n) => n.name), [nets]);
   const [zoneNet, setZoneNet] = useState<string>("GND");
@@ -128,11 +139,28 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     setRouting(null);
   };
 
+  // A tool switch abandons any half-drawn polygon or measurement.
+  useEffect(() => {
+    setZoneDraft(null);
+    setMeasure(null);
+  }, [tool]);
+
   const finishZone = (pts: Vec[] | null) => {
     if (pts && pts.length >= 3) {
       undo.stopCapturing();
-      addZone(doc, { net: zoneNet, layer, points: pts });
-      toast(`Copper pour for ${zoneNet} added on ${LAYER_NAME[layer]}`);
+      if (tool === "zone") {
+        addZone(doc, { net: zoneNet, layer, points: pts });
+        toast(`Copper pour for ${zoneNet} added on ${LAYER_NAME[layer]}`);
+      } else if (tool === "keepout") {
+        addKeepout(doc, { points: pts, layers: [...layers], noTracks: true, noVias: true, noPours: true });
+        toast("Keepout added on all layers (edit it in the inspector)");
+      } else if (tool === "outline") {
+        setBoardOutline(doc, pts);
+        toast("Board outline replaced; the board was re-origined to the outline's corner");
+      } else if (tool === "cutout") {
+        setBoard(doc, { cutouts: [...(design.board.cutouts ?? []), pts] });
+        toast("Cutout added");
+      }
     }
     setZoneDraft(null);
   };
@@ -164,7 +192,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       const k = e.key.toLowerCase();
       if (e.metaKey || e.ctrlKey) return;
       if (e.key === "Escape") {
-        if (zoneDraft) finishZone(zoneDraft);
+        if (measure) setMeasure(null);
+        else if (zoneDraft) finishZone(zoneDraft);
         else if (routing) finishRoute(routing);
         else {
           setTool("select");
@@ -176,6 +205,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         if (selection.kind === "trace") deleteTrace(doc, selection.id);
         if (selection.kind === "via") deleteVia(doc, selection.id);
         if (selection.kind === "zone") deleteZone(doc, selection.id);
+        if (selection.kind === "keepout") deleteKeepout(doc, selection.id);
+        if (selection.kind === "dimension") deletePcbGraphic(doc, selection.id);
         select(null);
       } else if (k === "r" && selection?.kind === "component") {
         const c = byId.get(selection.id);
@@ -188,6 +219,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       else if (k === "v") setTool("via");
       else if (k === "s") setTool("select");
       else if (k === "p") setTool("zone");
+      else if (k === "k") setTool("keepout");
+      else if (k === "m") setTool("measure");
       else if (k === "l") switchLayer();
     };
     window.addEventListener("keydown", onKey);
@@ -209,6 +242,8 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
     }
     const comps = [...design.components].filter((c) => getPart(c.partId)?.footprint).sort((a, b) => Number(b.pcb.side === layer) - Number(a.pcb.side === layer));
     for (const c of comps) if (inRect(p, courtyardRect(c)!)) return { kind: "component", id: c.id };
+    for (const g of design.pcbGraphics) if (g.kind === "dimension" && g.points.length >= 2 && pointSegmentDistance(p, g.points[0], g.points[1]) <= tol * 2) return { kind: "dimension", id: g.id };
+    for (const k of design.keepouts) if (pointInPolygon(p, k.points)) return { kind: "keepout", id: k.id };
     if (show.zones) {
       const zs = [...design.zones].sort((a, b) => Number(b.layer === layer) - Number(a.layer === layer));
       for (const z of zs) if (show[z.layer] && pointInPolygon(p, z.points)) return { kind: "zone", id: z.id };
@@ -237,9 +272,19 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
       addVia(doc, snapped(raw));
       return;
     }
-    if (tool === "zone") {
+    if (tool === "measure") {
       const p = snapped(raw);
-      if (e.detail >= 2 && zoneDraft) return finishZone(zoneDraft);
+      if (!measure) setMeasure(p);
+      else {
+        undo.stopCapturing();
+        addPcbGraphic(doc, { kind: "dimension", points: [measure, p] });
+        setMeasure(null);
+      }
+      return;
+    }
+    if (POLY_TOOLS.includes(tool)) {
+      const p = snapped(raw);
+      if (e.detail >= 2 && zoneDraft) return finishZone(dedupe(zoneDraft));
       setZoneDraft([...(zoneDraft ?? []), p]);
       return;
     }
@@ -313,7 +358,10 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
   }, [selection, analysis]);
 
   const layerOrder: CopperLayer[] = [...[...layers].reverse().filter((l) => l !== layer), layer];
-  const cutouts = useMemo(() => new Map(design.zones.map((z) => [z.id, zoneCutouts(design, z, analysis)])), [design, analysis]);
+  const fills = useMemo(() => new Map(design.zones.map((z) => [z.id, zoneFill(design, z, analysis)])), [design, analysis]);
+  const drops = useMemo(() => boardTeardrops(design, analysis), [design, analysis]);
+  const outline = boardOutline(design.board);
+  const boardPath = [outline, ...(design.board.cutouts ?? [])].map((poly) => `M${poly.map((p) => `${p.x},${p.y}`).join("L")}Z`).join("");
   const placed = design.components.filter((c) => getPart(c.partId)?.footprint);
 
   return (
@@ -326,7 +374,11 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         onPointerMove={onPointerMove}
         onPointerUp={() => (drag.current = null)}
         onPointerLeave={() => publishCursor(provider, null)}
-        onDoubleClick={() => routing && finishRoute(routing)}
+        onDoubleClick={() => {
+          // Chromium reports detail=0 on pointerdown, so double-click closing happens here.
+          if (routing) finishRoute(routing);
+          else if (zoneDraft && POLY_TOOLS.includes(tool)) finishZone(dedupe(zoneDraft));
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           if (routing) finishRoute(routing);
@@ -340,7 +392,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         </defs>
         <rect width="100%" height="100%" fill="url(#pcb-grid)" />
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
-          <rect x={0} y={0} width={design.board.width} height={design.board.height} fill="#0d3326" stroke="#e8d36b" strokeWidth={Math.max(0.1, px * 1.5)} rx={0.5} />
+          <path d={boardPath} fill="#0d3326" fillRule="evenodd" stroke="#e8d36b" strokeWidth={Math.max(0.1, px * 1.5)} />
 
           {layerOrder.map((l) => {
             if (!show[l]) return null;
@@ -357,21 +409,39 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
                         <g key={z.id}>
                           <mask id={`zm-${z.id}`} maskUnits="userSpaceOnUse">
                             <polygon points={pts} fill="white" />
-                            {cutouts.get(z.id)?.map((c, i) =>
-                              c.kind === "rect" ? (
-                                <rect key={i} x={c.rect.x0} y={c.rect.y0} width={c.rect.x1 - c.rect.x0} height={c.rect.y1 - c.rect.y0} fill="black" />
-                              ) : c.kind === "circle" ? (
-                                <circle key={i} cx={c.c.x} cy={c.c.y} r={c.r} fill="black" />
-                              ) : (
-                                <polyline key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} stroke="black" strokeWidth={c.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                              ),
-                            )}
+                            {(() => {
+                              const f = fills.get(z.id);
+                              if (!f) return null;
+                              const shape = (c: Cutout, i: number, color: string) =>
+                                c.kind === "rect" ? (
+                                  <rect key={i} x={c.rect.x0} y={c.rect.y0} width={c.rect.x1 - c.rect.x0} height={c.rect.y1 - c.rect.y0} fill={color} />
+                                ) : c.kind === "circle" ? (
+                                  <circle key={i} cx={c.c.x} cy={c.c.y} r={c.r} fill={color} />
+                                ) : c.kind === "polygon" ? (
+                                  <polygon key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} fill={color} />
+                                ) : (
+                                  <polyline key={i} points={c.points.map((p) => `${p.x},${p.y}`).join(" ")} stroke={color} strokeWidth={c.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                                );
+                              return (
+                                <>
+                                  {f.cutouts.map((c, i) => shape(c, i, "black"))}
+                                  {f.spokes.map((sp, i) => shape({ kind: "line", points: sp.points, width: sp.width }, 10000 + i, "white"))}
+                                  {f.clip.map((c, i) => shape(c, 20000 + i, "black"))}
+                                  {f.removed.map((r, i) => shape({ kind: "rect", rect: r }, 30000 + i, "black"))}
+                                </>
+                              );
+                            })()}
                           </mask>
                           <polygon points={pts} fill={LAYER_COLOR[l]} opacity={0.42} mask={`url(#zm-${z.id})`} />
                           <polygon points={pts} fill="none" stroke={sel ? "#ffffff" : LAYER_COLOR[l]} strokeWidth={px * (sel ? 2 : 1)} strokeDasharray={`${px * 6} ${px * 4}`} />
                         </g>
                       );
                     })}
+                {drops
+                  .filter((t) => t.layer === l)
+                  .map((t, i) => (
+                    <polygon key={`td${i}`} points={t.points.map((p) => `${p.x},${p.y}`).join(" ")} fill={LAYER_COLOR[l]} />
+                  ))}
                 {design.traces
                   .filter((t) => t.layer === l)
                   .map((t) => {
@@ -412,6 +482,23 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             <FootprintOverlay key={c.id} c={c} showSilk={show.silk} selected={selection?.kind === "component" && selection.id === c.id} remote={presence.find((p) => p.sel === c.id)?.user.color} px={px} />
           ))}
 
+          <defs>
+            <pattern id="ko-hatch" width={1} height={1} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <line x1={0} y1={0} x2={0} y2={1} stroke="#ef4444" strokeWidth={0.12} />
+            </pattern>
+          </defs>
+          {design.keepouts.map((k) => {
+            const sel = selection?.kind === "keepout" && selection.id === k.id;
+            return (
+              <polygon key={k.id} points={k.points.map((p) => `${p.x},${p.y}`).join(" ")} fill="url(#ko-hatch)" fillOpacity={0.7} stroke={sel ? "#ffffff" : "#ef4444"} strokeWidth={px * (sel ? 2 : 1.2)} strokeDasharray={`${px * 5} ${px * 3}`} />
+            );
+          })}
+          {design.pcbGraphics.map((g) =>
+            g.kind === "dimension" && g.points.length >= 2 ? (
+              <Dimension key={g.id} a={g.points[0]} b={g.points[1]} px={px} selected={selection?.kind === "dimension" && selection.id === g.id} />
+            ) : null,
+          )}
+          {measure && <Dimension a={measure} b={cursor} px={px} selected={false} live />}
           {show.rats &&
             rats.map((r, i) => <line key={i} x1={r.a.x} y1={r.a.y} x2={r.b.x} y2={r.b.y} stroke="#e5e7eb" strokeOpacity={0.75} strokeWidth={px} pointerEvents="none" />)}
 
@@ -422,7 +509,7 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
             </g>
           ))}
 
-          {zoneDraft && (
+          {zoneDraft && POLY_TOOLS.includes(tool) && (
             <polygon
               points={[...zoneDraft, cursor].map((p) => `${p.x},${p.y}`).join(" ")}
               fill={LAYER_COLOR[layer]}
@@ -473,6 +560,30 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
         <button className={tool === "zone" ? "active" : ""} onClick={() => setTool("zone")} title="Draw a copper pour outline (P)">
           Pour
         </button>
+        <button className={tool === "keepout" ? "active" : ""} onClick={() => setTool("keepout")} title="Draw a keepout area (K)">
+          Keepout
+        </button>
+        <button className={tool === "measure" ? "active" : ""} onClick={() => setTool("measure")} title="Measure / add a dimension (M)">
+          Measure
+        </button>
+        <select
+          value={tool === "outline" || tool === "cutout" ? tool : ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v === "rect") {
+              undo.stopCapturing();
+              setBoardOutline(doc, null);
+              setBoard(doc, { cutouts: [] });
+              toast("Board outline reset to a rectangle");
+            } else if (v) setTool(v as Tool);
+          }}
+          title="Board outline tools"
+        >
+          <option value="">Outline…</option>
+          <option value="outline">Draw board outline</option>
+          <option value="cutout">Draw cutout / slot</option>
+          <option value="rect">Reset to rectangle</option>
+        </select>
         <span className="sep" />
         <select value={layer} onChange={(e) => setLayer(e.target.value as CopperLayer)} title="Active layer (L cycles; while routing this drops a via)" style={{ color: LAYER_COLOR[layer] }}>
           {layers.map((l) => (
@@ -552,6 +663,18 @@ export function PcbCanvas({ presence }: { presence: PresenceState[] }) {
           ? routing
             ? "Click to add corners (45°, Shift = free) · click a pad to finish · L = via + switch layer · Enter / double-click / Esc to end"
             : "Click a pad to start a trace"
+          : tool === "measure"
+            ? measure
+              ? "Click the second point to add a dimension · Esc to cancel"
+              : "Click two points to measure and add a dimension"
+            : POLY_TOOLS.includes(tool) && tool !== "zone"
+              ? zoneDraft
+                ? "Click to add corners · double-click / Enter to close · Esc to finish"
+                : tool === "keepout"
+                  ? "Click corners of the keepout area"
+                  : tool === "outline"
+                    ? "Click corners of the new board outline"
+                    : "Click corners of the cutout"
           : tool === "via"
             ? "Click to place a via · Esc to stop"
             : tool === "zone"
@@ -605,6 +728,24 @@ function FootprintOverlay({ c, showSilk, selected, remote, px }: { c: ComponentD
       {(selected || remote) && (
         <rect x={r.x0} y={r.y0} width={r.x1 - r.x0} height={r.y1 - r.y0} fill={selected ? "rgba(96,165,250,0.12)" : "none"} stroke={selected ? "#60a5fa" : remote} strokeWidth={px * 1.5} strokeDasharray={`${px * 4} ${px * 3}`} pointerEvents="none" />
       )}
+    </g>
+  );
+}
+
+function Dimension({ a, b, px, selected, live }: { a: Vec; b: Vec; px: number; selected: boolean; live?: boolean }) {
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  const ux = len ? (b.y - a.y) / len : 0;
+  const uy = len ? -(b.x - a.x) / len : 0;
+  const t = 4 * px;
+  const color = selected ? "#ffffff" : "#60a5fa";
+  return (
+    <g pointerEvents="none">
+      <line x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={color} strokeWidth={px * 1.2} strokeDasharray={live ? `${px * 4} ${px * 3}` : undefined} />
+      <line x1={a.x - ux * t} y1={a.y - uy * t} x2={a.x + ux * t} y2={a.y + uy * t} stroke={color} strokeWidth={px * 1.2} />
+      <line x1={b.x - ux * t} y1={b.y - uy * t} x2={b.x + ux * t} y2={b.y + uy * t} stroke={color} strokeWidth={px * 1.2} />
+      <text x={(a.x + b.x) / 2 + ux * t * 2.5} y={(a.y + b.y) / 2 + uy * t * 2.5} fontSize={px * 11} fill={color} textAnchor="middle" fontWeight={600}>
+        {len.toFixed(2)} mm
+      </text>
     </g>
   );
 }

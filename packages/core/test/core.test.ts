@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import {
   addComponent,
   addTrace,
+  addVia,
   addWire,
   autoPlace,
   autoRoute,
@@ -70,6 +71,7 @@ describe("pcb", () => {
     const routed = autoRoute(design);
     expect(routed.failed).toEqual([]);
     for (const t of routed.traces) addTrace(doc, t);
+    for (const v of routed.vias) addVia(doc, v, v.diameter, v.drill);
     design = getDesign(doc);
     expect(ratsnest(design)).toEqual([]);
     expect(runDrc(design).filter((i) => i.severity === "error")).toEqual([]);

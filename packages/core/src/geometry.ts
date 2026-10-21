@@ -85,7 +85,10 @@ export interface WorldPin extends SymbolPin {
 export function schematicPins(c: ComponentData): WorldPin[] {
   const part = getPart(c.partId);
   if (!part) return [];
-  return part.symbol.pins.map((p) => ({ ...p, world: toWorld(p, c.sch) }));
+  const mirror = Boolean(c.sch.mirror);
+  // A mirrored pin on the left side ends up on the right (and vice versa).
+  const flip = (side: SymbolPin["side"]): SymbolPin["side"] => (mirror && side === "left" ? "right" : mirror && side === "right" ? "left" : side);
+  return part.symbol.pins.map((p) => ({ ...p, side: flip(p.side), world: toWorld(p, c.sch, mirror) }));
 }
 
 export function schematicPin(c: ComponentData, pinId: string): Vec | undefined {
@@ -164,4 +167,18 @@ export function polygonArea(poly: Vec[]): number {
   let a = 0;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) a += (poly[j].x + poly[i].x) * (poly[j].y - poly[i].y);
   return Math.abs(a / 2);
+}
+
+/** Horizontal scanline: inside intervals [x0, x1] of a polygon at height y (even-odd rule). */
+export function polygonSpans(poly: Vec[], y: number): [number, number][] {
+  const xs: number[] = [];
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i];
+    const b = poly[j];
+    if (a.y > y !== b.y > y) xs.push(((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x);
+  }
+  xs.sort((p, q) => p - q);
+  const out: [number, number][] = [];
+  for (let k = 0; k + 1 < xs.length; k += 2) out.push([xs[k], xs[k + 1]]);
+  return out;
 }

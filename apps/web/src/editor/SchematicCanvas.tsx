@@ -1,7 +1,12 @@
 import {
   addComponent,
+  addSchGraphic,
   addSheet,
   addWire,
+  busMembers,
+  deleteSchGraphic,
+  sheetPartId,
+  type Design,
   annotate,
   deleteSheet,
   renameSheet,
@@ -28,7 +33,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
 import { publishCursor, type PresenceState } from "./presence";
 import { SymbolBody } from "./render";
-import { beginPan, useViewport } from "./viewport";
+import { beginPan, dedupe, useViewport } from "./viewport";
 
 const GRID = 10;
 const COLORS = { body: "#7a1f1f", wire: "#0b7a3e", wireHi: "#16a34a", sel: "#2563eb", text: "#1f2937", power: "#b91c1c" };
@@ -59,7 +64,7 @@ function symbolBounds(c: ComponentData) {
   const xs: number[] = [];
   const ys: number[] = [];
   const add = (p: Vec) => {
-    const r = rotate(p, c.sch.rot);
+    const r = rotate(c.sch.mirror ? { x: -p.x, y: p.y } : p, c.sch.rot);
     xs.push(r.x);
     ys.push(r.y);
   };
@@ -69,7 +74,7 @@ function symbolBounds(c: ComponentData) {
     if (s.kind === "line" || s.kind === "polygon") s.points.forEach(add);
     if (s.kind === "circle") [{ x: s.x - s.r, y: s.y - s.r }, { x: s.x + s.r, y: s.y + s.r }].forEach(add);
   }
-  if (part.kind === "netlabel") add({ x: 12 + c.value.length * 6, y: 0 });
+  if (part.kind === "netlabel" || part.kind === "locallabel" || part.kind === "hierlabel") add({ x: 16 + c.value.length * 6, y: 4 });
   return { x0: Math.min(...xs) - 3, y0: Math.min(...ys) - 3, x1: Math.max(...xs) + 3, y1: Math.max(...ys) + 3 };
 }
 
@@ -81,6 +86,9 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   const [cursor, setCursor] = useState<Vec>({ x: 0, y: 0 });
   const [wiring, setWiring] = useState<Wiring | null>(null);
   const [ncTool, setNcTool] = useState(false);
+  /** Free drawing tools: bus polyline or text note. */
+  const [drawTool, setDrawTool] = useState<"bus" | "text" | null>(null);
+  const [busDraft, setBusDraft] = useState<Vec[] | null>(null);
   const [sheet, setSheet] = useState(design.sheets[0].id);
   const sheetIds = design.sheets.map((s) => s.id);
   useEffect(() => {
@@ -155,7 +163,14 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("input, textarea, select")) return;
       if (e.key.toLowerCase() === "q" && !e.metaKey && !e.ctrlKey) setNcTool((v) => !v);
+      if (e.key === "Enter" && busDraft) finishBus();
+      if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey && selection?.kind === "component") {
+        const c = byId.get(selection.id);
+        if (c) updateComponent(doc, c.id, { sch: { ...c.sch, mirror: !c.sch.mirror } });
+      }
       if (e.key === "Escape") {
+        setDrawTool(null);
+        setBusDraft(null);
         setNcTool(false);
         setWiring(null);
         setPlacing(null);
@@ -163,6 +178,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
       } else if ((e.key === "Delete" || e.key === "Backspace") && selection) {
         if (selection.kind === "component") deleteComponent(doc, selection.id);
         if (selection.kind === "wire") deleteWire(doc, selection.id);
+        if (selection.kind === "graphic") deleteSchGraphic(doc, selection.id);
         select(null);
       } else if (e.key.toLowerCase() === "r" && !e.metaKey && !e.ctrlKey && selection?.kind === "component") {
         const c = byId.get(selection.id);
@@ -196,7 +212,32 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
     }
   };
 
+  const finishBus = (pts = busDraft && dedupe(busDraft)) => {
+    if (pts && pts.length >= 2) {
+      const name = prompt("Bus name (e.g. D[0..7] or {SDA SCL})", "D[0..7]");
+      if (name?.trim()) {
+        undo.stopCapturing();
+        addSchGraphic(doc, { sheet, kind: "bus", points: pts, text: name.trim() });
+        ed.toast(`Bus ${name.trim()}: connect members with labels ${busMembers(name.trim()).slice(0, 4).join(", ")}…`);
+      }
+    }
+    setBusDraft(null);
+  };
+
   const onBackgroundDown = (e: React.PointerEvent) => {
+    if (e.button === 0 && drawTool) {
+      const p = toGrid(vp.toWorld(e.clientX, e.clientY));
+      if (drawTool === "text") {
+        const text = prompt("Note text");
+        if (text?.trim()) addSchGraphic(doc, { sheet, kind: "text", points: [p], text: text.trim(), size: 10 });
+        setDrawTool(null);
+      } else if (e.detail >= 2 && busDraft) finishBus();
+      else {
+        const last = busDraft?.at(-1);
+        setBusDraft([...(busDraft ?? []), ...(last ? elbow(last, p) : []), p]);
+      }
+      return;
+    }
     if (e.button === 1 || (e.button === 0 && !placing && !wiring)) {
       if (e.button === 0) select(null);
       return beginPan(e, vp.viewRef, vp.setView);
@@ -255,6 +296,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         className="canvas-svg"
         style={{ background: "var(--sch-bg)", cursor: placing || wiring ? "crosshair" : "default" }}
         onPointerDown={onBackgroundDown}
+        onDoubleClick={() => drawTool === "bus" && busDraft && finishBus()}
         onPointerMove={onPointerMove}
         onPointerUp={() => (drag.current = null)}
         onPointerLeave={() => publishCursor(provider, null)}
@@ -271,6 +313,38 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         </defs>
         <rect width="100%" height="100%" fill="url(#sch-grid)" />
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
+          <SheetFrame design={design} sheet={sheet} comps={onSheet} />
+          {design.schGraphics
+            .filter((g) => g.sheet === sheet)
+            .map((g) => {
+              const sel = selection?.kind === "graphic" && selection.id === g.id;
+              const down = (e: React.PointerEvent) => {
+                if (e.button !== 0 || placing || wiring || drawTool) return;
+                e.stopPropagation();
+                select({ kind: "graphic", id: g.id });
+              };
+              if (g.kind === "text")
+                return (
+                  <text key={g.id} x={g.points[0].x} y={g.points[0].y} fontSize={g.size ?? 10} fill={sel ? COLORS.sel : "#374151"} onPointerDown={down} style={{ cursor: "pointer" }}>
+                    {g.text}
+                  </text>
+                );
+              const pts = g.points.map((p) => `${p.x},${p.y}`).join(" ");
+              return (
+                <g key={g.id} onPointerDown={down} style={{ cursor: "pointer" }}>
+                  <polyline points={pts} stroke="transparent" strokeWidth={10} fill="none" />
+                  <polyline points={pts} stroke={sel ? COLORS.sel : g.kind === "bus" ? "#1d4ed8" : "#6b7280"} strokeWidth={g.kind === "bus" ? 4 : 1} fill="none" strokeLinejoin="round" strokeLinecap="round" />
+                  {g.kind === "bus" && g.text && (
+                    <text x={g.points[0].x + 3} y={g.points[0].y - 5} fontSize={8.5} fill="#1d4ed8" fontWeight={600}>
+                      {g.text}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
+          {busDraft && (
+            <polyline points={[...busDraft, gp].map((p) => `${p.x},${p.y}`).join(" ")} stroke="#1d4ed8" strokeWidth={4} strokeOpacity={0.5} fill="none" pointerEvents="none" />
+          )}
           {sheetWires.map((w) => {
             const pts = wirePath(byId, w);
             if (!pts) return null;
@@ -299,15 +373,23 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
             const sel = selection?.kind === "component" && selection.id === c.id;
             const b = symbolBounds(c);
             const color = part.kind === "part" ? COLORS.body : COLORS.power;
-            const refP = rotate(part.symbol.refPos, c.sch.rot);
-            const valP = rotate(part.symbol.valuePos, c.sch.rot);
+            const mx = (p: Vec) => (c.sch.mirror ? { x: -p.x, y: p.y } : p);
+            const refP = rotate(mx(part.symbol.refPos), c.sch.rot);
+            const valP = rotate(mx(part.symbol.valuePos), c.sch.rot);
+            const isLabel = part.kind === "netlabel" || part.kind === "locallabel" || part.kind === "hierlabel";
             const vertical = c.sch.rot === 90 || c.sch.rot === 270;
             const remote = remoteSel.get(c.id);
             return (
-              <g key={c.id} transform={`translate(${c.sch.x},${c.sch.y})`} onPointerDown={(e) => onComponentDown(e, c)} style={{ cursor: "move" }}>
+              <g
+                key={c.id}
+                transform={`translate(${c.sch.x},${c.sch.y})`}
+                onPointerDown={(e) => onComponentDown(e, c)}
+                onDoubleClick={() => part.kind === "sheet" && design.sheets.some((x) => x.id === c.value) && setSheet(c.value)}
+                style={{ cursor: "move" }}
+              >
                 <rect x={b.x0} y={b.y0} width={b.x1 - b.x0} height={b.y1 - b.y0} fill={sel ? "rgba(37,99,235,0.08)" : "transparent"} stroke={sel ? COLORS.sel : remote ?? "none"} strokeDasharray={remote && !sel ? "4 3" : undefined} strokeWidth={1} rx={3} />
-                <g transform={`rotate(${c.sch.rot})`}>
-                  <SymbolBody part={part} color={color} rot={c.sch.rot} />
+                <g transform={`rotate(${c.sch.rot})${c.sch.mirror ? " scale(-1 1)" : ""}`}>
+                  <SymbolBody part={part} color={color} rot={c.sch.rot} mirror={c.sch.mirror} />
                 </g>
                 {part.kind === "part" && (
                   <>
@@ -319,12 +401,24 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
                     </text>
                   </>
                 )}
-                {part.kind !== "part" && (
-                  <text x={valP.x} y={valP.y} fontSize={8.5} fontWeight={600} fill={COLORS.power} textAnchor={part.kind === "netlabel" ? "start" : "middle"}>
+                {part.kind === "sheet" && (
+                  <text x={b.x0 + 3} y={b.y0 - 2} fontSize={8} fill="#1d4ed8" fontWeight={600}>
+                    {design.sheets.find((x) => x.id === c.value)?.name ?? "missing sheet"} ↗
+                  </text>
+                )}
+                {part.kind !== "part" && part.kind !== "sheet" && (
+                  <text
+                    x={valP.x}
+                    y={valP.y}
+                    fontSize={8.5}
+                    fontWeight={600}
+                    fill={part.kind === "power" ? COLORS.power : part.kind === "hierlabel" ? "#7c3aed" : part.kind === "locallabel" ? "#1f2937" : "#b45309"}
+                    textAnchor={isLabel ? (c.sch.mirror ? "end" : "start") : "middle"}
+                  >
                     {c.value}
                   </text>
                 )}
-                {schematicPins({ ...c, sch: { x: 0, y: 0, rot: c.sch.rot as Rotation } }).map((p) => {
+                {schematicPins({ ...c, sch: { x: 0, y: 0, rot: c.sch.rot as Rotation, mirror: c.sch.mirror } }).map((p) => {
                   const t = { comp: c.id, pin: p.id };
                   const n = wireCount.get(termKey(t)) ?? 0;
                   const active = wiring && wiring.from.comp === c.id && wiring.from.pin === p.id;
@@ -384,8 +478,35 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         <button onClick={() => setPlacing("power_rail")} className={placing === "power_rail" ? "active" : ""} title="Place power rail symbol">
           Power
         </button>
-        <button onClick={() => setPlacing("net_label")} className={placing === "net_label" ? "active" : ""} title="Place net label (connects across sheets)">
-          Label
+        <select
+          value={["net_label", "local_label", "hier_label"].includes(placing ?? "") ? placing! : ""}
+          onChange={(e) => e.target.value && setPlacing(e.target.value)}
+          title="Place a label: global (all sheets), local (this sheet), hierarchical (sheet port)"
+        >
+          <option value="">Label…</option>
+          <option value="net_label">Global label</option>
+          <option value="local_label">Local label</option>
+          <option value="hier_label">Hierarchical label</option>
+        </select>
+        <select
+          value={placing?.startsWith("sheet:") ? placing : ""}
+          onChange={(e) => e.target.value && setPlacing(e.target.value)}
+          title="Place a sheet symbol for a child sheet (its pins are the child's hierarchical labels)"
+        >
+          <option value="">Sheet symbol…</option>
+          {design.sheets
+            .filter((x) => x.id !== sheet)
+            .map((x) => (
+              <option key={x.id} value={sheetPartId(x.id)}>
+                {x.name}
+              </option>
+            ))}
+        </select>
+        <button className={drawTool === "bus" ? "active" : ""} onClick={() => (setDrawTool(drawTool === "bus" ? null : "bus"), setBusDraft(null), setPlacing(null))} title="Draw a bus">
+          Bus
+        </button>
+        <button className={drawTool === "text" ? "active" : ""} onClick={() => (setDrawTool(drawTool === "text" ? null : "text"), setPlacing(null))} title="Add a text note">
+          Text
         </button>
         <button onClick={() => (setNcTool(!ncTool), setPlacing(null), setWiring(null))} className={ncTool ? "active" : ""} title="Toggle no-connect flags on pins (Q)">
           No-connect
@@ -407,9 +528,16 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         }} title="Rotate (R)">
           Rotate
         </button>
+        <button disabled={selection?.kind !== "component"} onClick={() => {
+          const c = selection && byId.get(selection.id);
+          if (c) updateComponent(doc, c.id, { sch: { ...c.sch, mirror: !c.sch.mirror } });
+        }} title="Mirror (M)">
+          Mirror
+        </button>
         <button disabled={!selection} onClick={() => {
           if (selection?.kind === "component") deleteComponent(doc, selection.id);
           if (selection?.kind === "wire") deleteWire(doc, selection.id);
+          if (selection?.kind === "graphic") deleteSchGraphic(doc, selection.id);
           select(null);
         }} title="Delete (Del)">
           Delete
@@ -421,7 +549,11 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
       </div>
       <SheetTabs sheet={sheet} setSheet={setSheet} />
       <div className="hint" style={{ bottom: 44 }}>
-        {ncTool
+        {drawTool === "bus"
+          ? "Click to add bus corners · double-click / Enter to name it · Esc to cancel"
+          : drawTool === "text"
+            ? "Click where the note should go"
+            : ncTool
           ? "Click pins to toggle no-connect flags · Esc to stop"
           : placing
           ? "Click to place · Shift+click to keep placing · Esc to stop"
@@ -498,5 +630,46 @@ function SheetTabs({ sheet, setSheet }: { sheet: string; setSheet: (id: string) 
         +
       </button>
     </div>
+  );
+}
+
+/** Drawing frame with a title block, sized to enclose the sheet (at least A4 landscape). */
+function SheetFrame({ design, sheet, comps }: { design: Design; sheet: string; comps: ComponentData[] }) {
+  const xs = comps.flatMap((c) => [c.sch.x - 80, c.sch.x + 80]);
+  const ys = comps.flatMap((c) => [c.sch.y - 60, c.sch.y + 60]);
+  const x0 = Math.min(-250, ...xs);
+  const y0 = Math.min(-200, ...ys);
+  const x1 = Math.max(x0 + 1169, ...xs);
+  const y1 = Math.max(y0 + 827, ...ys.map((y) => y + 90));
+  const tb = design.titleBlock;
+  const w = 300;
+  const h = 70;
+  const sheetName = design.sheets.find((s) => s.id === sheet)?.name ?? "";
+  const idx = design.sheets.findIndex((s) => s.id === sheet) + 1;
+  return (
+    <g pointerEvents="none" fill="none" stroke="#a8a294" strokeWidth={1}>
+      <rect x={x0} y={y0} width={x1 - x0} height={y1 - y0} />
+      <rect x={x0 + 10} y={y0 + 10} width={x1 - x0 - 20} height={y1 - y0 - 20} strokeWidth={0.6} />
+      <g transform={`translate(${x1 - 10 - w},${y1 - 10 - h})`}>
+        <rect width={w} height={h} fill="#fbfaf5" />
+        <line x1={0} y1={26} x2={w} y2={26} />
+        <line x1={0} y1={48} x2={w} y2={48} />
+        <text x={8} y={19} fontSize={13} fill="#1f2937" stroke="none" fontWeight={600}>
+          {tb.title || design.name}
+        </text>
+        <text x={8} y={41} fontSize={9} fill="#374151" stroke="none">
+          Sheet {idx}/{design.sheets.length}: {sheetName}
+        </text>
+        <text x={w - 8} y={41} fontSize={9} fill="#374151" stroke="none" textAnchor="end">
+          Rev {tb.revision || "-"}
+        </text>
+        <text x={8} y={62} fontSize={8} fill="#6b7280" stroke="none">
+          {[tb.company, tb.author].filter(Boolean).join(" · ") || "PCBian"}
+        </text>
+        <text x={w - 8} y={62} fontSize={8} fill="#6b7280" stroke="none" textAnchor="end">
+          {tb.date}
+        </text>
+      </g>
+    </g>
   );
 }

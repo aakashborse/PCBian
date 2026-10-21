@@ -71,3 +71,6 @@ export function beginPan(e: React.PointerEvent, viewRef: React.RefObject<View>, 
   target.addEventListener("pointermove", move as EventListener);
   target.addEventListener("pointerup", up);
 }
+
+/** Drops consecutive repeated points (a double-click lands the same point twice). */
+export const dedupe = <P extends { x: number; y: number }>(pts: P[]): P[] => pts.filter((p, i) => i === 0 || p.x !== pts[i - 1].x || p.y !== pts[i - 1].y);

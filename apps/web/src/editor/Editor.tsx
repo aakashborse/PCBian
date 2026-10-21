@@ -36,6 +36,15 @@ export function Editor({ projectId }: { projectId: string }) {
   const [copilot, setCopilot] = useState<boolean | null>(null);
   const [missing, setMissing] = useState(false);
   const toastTimer = useRef<number>(0);
+  const [importReport, setImportReport] = useState<{ components: number; nets: number; sheets: number; traces: number; vias: number; zones: number; warnings: string[] } | null>(() => {
+    try {
+      const raw = sessionStorage.getItem(`pcbian.import.${projectId}`);
+      if (raw) sessionStorage.removeItem(`pcbian.import.${projectId}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     api.health().then((h) => setCopilot(h.copilot)).catch(() => setCopilot(false));
@@ -65,7 +74,10 @@ export function Editor({ projectId }: { projectId: string }) {
       (selection.kind === "wire" && design.wires.some((w) => w.id === selection.id)) ||
       (selection.kind === "trace" && design.traces.some((t) => t.id === selection.id)) ||
       (selection.kind === "via" && design.vias.some((v) => v.id === selection.id)) ||
-      (selection.kind === "zone" && design.zones.some((z) => z.id === selection.id));
+      (selection.kind === "zone" && design.zones.some((z) => z.id === selection.id)) ||
+      (selection.kind === "keepout" && design.keepouts.some((k) => k.id === selection.id)) ||
+      (selection.kind === "dimension" && design.pcbGraphics.some((g) => g.id === selection.id)) ||
+      (selection.kind === "graphic" && design.schGraphics.some((g) => g.id === selection.id));
     if (!exists) select(null);
   }, [design, selection, select]);
 
@@ -174,6 +186,8 @@ export function Editor({ projectId }: { projectId: string }) {
                 {(
                   [
                     ["Gerber + drill (fabrication .zip)", () => exporters.gerbers(design)],
+                    ["Schematic (.pdf)", () => exporters.schematicPdf(design)],
+                    ["Assembly drawing (.pdf)", () => exporters.assemblyPdf(design)],
                     ["Bill of materials (.csv)", () => exporters.bom(design)],
                     ["Pick and place (.csv)", () => exporters.pnp(design)],
                     ["KiCad board (.kicad_pcb)", () => exporters.kicadPcb(design)],
@@ -227,6 +241,31 @@ export function Editor({ projectId }: { projectId: string }) {
         </aside>
       </div>
       {toastMsg && <div className="toast">{toastMsg}</div>}
+      {importReport && (
+        <div className="modal-backdrop" onClick={() => setImportReport(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px, calc(100vw - 32px))" }}>
+            <h3>KiCad import</h3>
+            <p className="small" style={{ margin: 0 }}>
+              {importReport.components} components · {importReport.nets} nets · {importReport.sheets || 1} sheet(s) · {importReport.traces} track segments · {importReport.vias} vias · {importReport.zones} pours
+            </p>
+            {importReport.warnings.length > 0 && (
+              <div className="card small" style={{ maxHeight: 260, overflow: "auto", margin: 0 }}>
+                {importReport.warnings.map((w, i) => (
+                  <div key={i} style={{ color: "var(--warn)", marginBottom: 3 }}>
+                    ⚠ {w}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="row">
+              <span className="spacer" />
+              <button className="primary" onClick={() => setImportReport(null)}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </EditorContext.Provider>
   );
 

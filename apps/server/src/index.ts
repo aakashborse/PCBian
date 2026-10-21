@@ -2,7 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setName } from "@pcbian/core";
+import { importKicadProject, initDoc, setName } from "@pcbian/core";
 import express from "express";
 import { WebSocketServer } from "ws";
 import { copilotEnabled, isBusy, resetCopilot, runCopilot, stopCopilot } from "./copilot.js";
@@ -12,7 +12,7 @@ import { buildTemplate, TEMPLATES, type TemplateId } from "./templates.js";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "60mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, copilot: copilotEnabled() });
@@ -34,6 +34,26 @@ app.post("/api/projects", (req, res) => {
   buildTemplate(room.doc, template, name);
   room.save();
   res.status(201).json(meta);
+});
+
+// Create a project from KiCad files (.kicad_sch sheets and/or a .kicad_pcb board).
+app.post("/api/projects/import", (req, res) => {
+  const schematics = Array.isArray(req.body?.schematics) ? (req.body.schematics as { name: string; text: string }[]).filter((f) => typeof f?.text === "string") : [];
+  const pcb = typeof req.body?.pcb === "string" ? req.body.pcb : undefined;
+  if (!schematics.length && !pcb) return void res.status(400).json({ error: "Provide at least one .kicad_sch or a .kicad_pcb file" });
+  const name = String(req.body?.name ?? "").trim() || "Imported KiCad project";
+  const meta = createProjectMeta(name);
+  const room = getRoom(meta.id);
+  try {
+    initDoc(room.doc, name);
+    const report = importKicadProject(room.doc, { schematics, pcb });
+    room.save();
+    res.status(201).json({ ...meta, report });
+  } catch (e) {
+    dropRoom(meta.id);
+    deleteProjectMeta(meta.id);
+    res.status(400).json({ error: `Import failed: ${(e as Error).message}` });
+  }
 });
 
 app.get("/api/projects/:id", (req, res) => {

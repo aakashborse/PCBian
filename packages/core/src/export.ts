@@ -2,8 +2,8 @@
 import { courtyardRect, padsOf, toWorld } from "./geometry";
 import { getPart } from "./library";
 import { computeNets } from "./netlist";
-import { analyzeCopper, zoneCutouts } from "./copper";
-import { copperLayers } from "./doc";
+import { analyzeCopper, boardTeardrops, zoneFill, type Cutout } from "./copper";
+import { boardOutline, copperLayers } from "./doc";
 import { strokeText } from "./font";
 import type { ComponentData, CopperLayer, Design, Shape, Side, Vec } from "./types";
 
@@ -11,7 +11,7 @@ export function bomCsv(design: Design): string {
   const groups = new Map<string, { refs: string[]; value: string; part: string; footprint: string; mpn: string }>();
   for (const c of design.components) {
     const part = getPart(c.partId);
-    if (!part || part.kind !== "part" || c.dnp) continue;
+    if (!part || part.kind !== "part" || !part.footprint || c.dnp) continue;
     const key = `${c.partId}|${c.value}`;
     if (!groups.has(key)) groups.set(key, { refs: [], value: c.value, part: part.name, footprint: part.footprint?.name ?? "", mpn: part.mpn ?? "" });
     groups.get(key)!.refs.push(c.ref);
@@ -130,23 +130,33 @@ export function gerberFiles(design: Design): Record<string, string> {
   const parts = design.components.filter((c) => getPart(c.partId)?.footprint && !c.dnp);
   const allParts = design.components.filter((c) => getPart(c.partId)?.footprint);
   const layers = copperLayers(design.board);
-  const analysis = design.zones.length ? analyzeCopper(design) : null;
+  const analysis = design.zones.length || design.board.teardrops ? analyzeCopper(design) : null;
+  const drops = analysis ? boardTeardrops(design, analysis) : [];
 
   layers.forEach((layer, i) => {
     const pos = i === 0 ? "Top" : i === layers.length - 1 ? "Bot" : "Inr";
     const cu = new Gerber(`Copper,L${i + 1},${pos}`, H);
-    // Pours first: dark region, then clear-polarity cut-outs around other-net copper.
+    // Pours first: dark region, clear cut-outs, dark thermal spokes, clear again to clip spokes, clear removed islands.
     for (const z of design.zones.filter((z) => z.layer === layer)) {
+      const fill = zoneFill(design, z, analysis!);
+      const clear = (c: Cutout) => {
+        if (c.kind === "rect") cu.flash("R", c.rect.x1 - c.rect.x0, c.rect.y1 - c.rect.y0, { x: (c.rect.x0 + c.rect.x1) / 2, y: (c.rect.y0 + c.rect.y1) / 2 });
+        else if (c.kind === "circle") cu.flash("C", c.r * 2, c.r * 2, c.c);
+        else if (c.kind === "polygon") cu.region(c.points);
+        else cu.polyline(c.width, c.points);
+      };
       cu.polarity(true);
       cu.region(z.points);
       cu.polarity(false);
-      for (const c of zoneCutouts(design, z, analysis!)) {
-        if (c.kind === "rect") cu.flash("R", c.rect.x1 - c.rect.x0, c.rect.y1 - c.rect.y0, { x: (c.rect.x0 + c.rect.x1) / 2, y: (c.rect.y0 + c.rect.y1) / 2 });
-        else if (c.kind === "circle") cu.flash("C", c.r * 2, c.r * 2, c.c);
-        else cu.polyline(c.width, c.points);
-      }
+      fill.cutouts.forEach(clear);
+      cu.polarity(true);
+      for (const sp of fill.spokes) cu.polyline(sp.width, sp.points);
+      cu.polarity(false);
+      fill.clip.forEach(clear);
+      for (const r of fill.removed) clear({ kind: "rect", rect: r });
       cu.polarity(true);
     }
+    for (const td of drops.filter((t) => t.layer === layer)) cu.region(td.points);
     for (const c of allParts) {
       for (const p of padsOf(c)) {
         if (!p.layers.includes(layer)) continue;
@@ -176,14 +186,17 @@ export function gerberFiles(design: Design): Record<string, string> {
         for (const stroke of strokeText(c.ref, { x: c.pcb.x, y: r.y0 - 0.9 }, 0.8, side === "bottom")) silk.polyline(0.12, stroke);
       }
     }
+    // Clip silkscreen away from exposed copper.
+    silk.polarity(false);
+    for (const c of allParts) for (const p of padsOf(c)) if (p.layers.includes(side)) silk.flash(p.shape === "circle" ? "C" : "R", p.ww + 0.2, p.wh + 0.2, p.world);
+    silk.polarity(true);
     files[`${design.name}-${tag}_Mask.${side === "top" ? "gts" : "gbs"}`] = mask.toString();
     files[`${design.name}-${tag}_Silkscreen.${side === "top" ? "gto" : "gbo"}`] = silk.toString();
     files[`${design.name}-${tag}_Paste.${side === "top" ? "gtp" : "gbp"}`] = paste.toString();
   }
 
   const edge = new Gerber("Profile,NP", H);
-  const { width: W } = design.board;
-  edge.polyline(0.1, [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }, { x: 0, y: 0 }]);
+  for (const poly of [boardOutline(design.board), ...(design.board.cutouts ?? [])]) edge.polyline(0.1, [...poly, poly[0]]);
   files[`${design.name}-Edge_Cuts.gm1`] = edge.toString();
   files[`${design.name}.drl`] = excellon(design);
   files[`${design.name}-fab-notes.txt`] = fabNotes(design);

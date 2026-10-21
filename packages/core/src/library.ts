@@ -1,6 +1,6 @@
 // Built-in parts library: schematic symbols paired with footprints.
 import * as fp from "./footprints";
-import type { Footprint, PartDef, PartSymbol, Shape, SymbolPin } from "./types";
+import type { Footprint, PartDef, PartSymbol, PinType, Shape, SymbolPin } from "./types";
 
 // ---------- symbol helpers (schematic units, 10 = one grid step) ----------
 
@@ -147,6 +147,41 @@ function powerSymbol(kind: "gnd" | "rail"): PartSymbol {
   };
 }
 
+const localLabelSymbol: PartSymbol = {
+  shapes: [{ kind: "line", points: [{ x: 0, y: 0 }, { x: 40, y: 0 }] }],
+  pins: [pin("1", "1", 0, 0, "left", 0)],
+  refPos: { x: 0, y: 0 },
+  valuePos: { x: 2, y: -3 },
+};
+
+const hierLabelSymbol: PartSymbol = {
+  shapes: [{ kind: "polygon", points: [{ x: 0, y: 0 }, { x: 6, y: -5 }, { x: 12, y: -5 }, { x: 12, y: 5 }, { x: 6, y: 5 }], fill: false }],
+  pins: [pin("1", "1", 0, 0, "left", 0)],
+  refPos: { x: 0, y: 0 },
+  valuePos: { x: 15, y: 3 },
+};
+
+/** Single-pin mechanical symbol (mounting holes, fiducials). */
+function twoPinless(label: string): PartSymbol {
+  return {
+    shapes: [
+      { kind: "circle", x: 0, y: 0, r: 10 },
+      { kind: "circle", x: 0, y: 0, r: 4 },
+      { kind: "text", x: 0, y: -14, text: label, size: 7, anchor: "middle" },
+    ],
+    pins: [pin("1", "1", 0, 20, "bottom", 10)],
+    refPos: { x: 14, y: -4 },
+    valuePos: { x: 14, y: 8 },
+  };
+}
+
+function sourceSymbol(kind: "V" | "I"): PartSymbol {
+  const shapes: Shape[] = [{ kind: "circle", x: 0, y: 0, r: 12 }];
+  if (kind === "V") shapes.push({ kind: "text", x: 0, y: -3, text: "+", size: 9, anchor: "middle" }, { kind: "text", x: 0, y: 9, text: "−", size: 9, anchor: "middle" });
+  else shapes.push({ kind: "line", points: [{ x: 0, y: 7 }, { x: 0, y: -7 }] }, { kind: "polygon", points: [{ x: 0, y: -8 }, { x: -3, y: -3 }, { x: 3, y: -3 }], fill: true });
+  return { shapes, pins: [pin("1", "+", 0, -20, "top", 8), pin("2", "-", 0, 20, "bottom", 8)], refPos: { x: 16, y: -4 }, valuePos: { x: 16, y: 8 } };
+}
+
 const netLabelSymbol: PartSymbol = {
   shapes: [{ kind: "line", points: [{ x: 0, y: 0 }, { x: 6, y: -6 }, { x: 40, y: -6 }, { x: 40, y: 6 }, { x: 6, y: 6 }, { x: 0, y: 0 }] }],
   pins: [pin("1", "1", 0, 0, "left", 0)],
@@ -260,8 +295,34 @@ export const PARTS: PartDef[] = [
   // ----- power symbols and net labels -----
   part({ id: "power_gnd", name: "GND", category: "Power Symbols", kind: "power", refPrefix: "#PWR", defaultValue: "GND", symbol: powerSymbol("gnd"), footprint: null, description: "Ground power symbol. All GND symbols share one net.", keywords: ["gnd", "ground"] }),
   part({ id: "power_rail", name: "Power Rail", category: "Power Symbols", kind: "power", refPrefix: "#PWR", defaultValue: "+3V3", symbol: powerSymbol("rail"), footprint: null, description: "Power rail symbol (e.g. +3V3, +5V, VBUS). The value is the net name; all rails with the same value are connected.", keywords: ["vcc", "vdd", "3v3", "5v", "power", "rail"] }),
-  part({ id: "net_label", name: "Net Label", category: "Power Symbols", kind: "netlabel", refPrefix: "#LBL", defaultValue: "NET", symbol: netLabelSymbol, footprint: null, description: "Named net label. Pins attached to labels with the same value are connected.", keywords: ["label", "net", "name"] }),
+  part({ id: "net_label", name: "Global Label", category: "Labels", kind: "netlabel", refPrefix: "#LBL", defaultValue: "NET", symbol: netLabelSymbol, footprint: null, description: "Global net label. Pins attached to global labels with the same name are connected on every sheet.", keywords: ["label", "net", "name", "global"] }),
+  part({ id: "local_label", name: "Local Label", category: "Labels", kind: "locallabel", refPrefix: "#LBL", defaultValue: "SIG", symbol: localLabelSymbol, footprint: null, description: "Local net label. Connects only to labels with the same name on the same sheet.", keywords: ["label", "local", "net"] }),
+  part({ id: "hier_label", name: "Hierarchical Label", category: "Labels", kind: "hierlabel", refPrefix: "#LBL", defaultValue: "PORT", symbol: hierLabelSymbol, footprint: null, description: "Hierarchical port of a sheet. Appears as a pin on this sheet's sheet symbol in the parent sheet.", keywords: ["label", "hierarchical", "port", "sheet"] }),
+  part({ id: "mounting_hole_m3", name: "Mounting Hole M3 (plated)", category: "Mechanical", refPrefix: "H", defaultValue: "M3", symbol: twoPinless("H"), footprint: fp.mountingHole(3.2, 6), description: "Plated M3 mounting hole (3.2mm drill, 6mm pad). Connect to GND for chassis ground or leave unconnected (no-connect).", keywords: ["mounting", "hole", "m3", "screw", "mechanical"] }),
+  part({ id: "mounting_hole_m2", name: "Mounting Hole M2 (plated)", category: "Mechanical", refPrefix: "H", defaultValue: "M2", symbol: twoPinless("H"), footprint: fp.mountingHole(2.2, 4), description: "Plated M2 mounting hole (2.2mm drill, 4mm pad).", keywords: ["mounting", "hole", "m2", "screw", "mechanical"] }),
+  part({ id: "fiducial", name: "Fiducial (1mm)", category: "Mechanical", refPrefix: "FID", defaultValue: "Fiducial", symbol: twoPinless("FID"), footprint: fp.fiducial(), description: "1mm copper fiducial for pick-and-place alignment. Leave unconnected (mark no-connect).", keywords: ["fiducial", "assembly", "mechanical"] }),
+  // ----- simulation sources (no footprint) -----
+  part({ id: "sim_vsource", name: "Voltage Source (simulation)", category: "Simulation", refPrefix: "V", defaultValue: "DC 5", symbol: sourceSymbol("V"), footprint: null, description: "Independent voltage source for simulation. Value: 'DC 5', 'PULSE(0 5 0 1u 1u 0.5m 1m)', 'SIN(0 1 1k)', optionally followed by 'AC 1' for AC analysis. Pin 1 = +, pin 2 = -.", keywords: ["source", "voltage", "simulation", "pulse", "sine", "signal"] }),
+  part({ id: "sim_isource", name: "Current Source (simulation)", category: "Simulation", refPrefix: "I", defaultValue: "DC 1m", symbol: sourceSymbol("I"), footprint: null, description: "Independent current source for simulation; current flows out of pin 1 through the external circuit into pin 2. Value as for the voltage source.", keywords: ["source", "current", "simulation"] }),
 ];
+
+// ---------- pin electrical types (for ERC) ----------
+
+const PIN_TYPES: Record<string, Record<string, PinType>> = {
+  ne555_dip8: { "8": "power_in", "1": "power_in", "4": "input", "2": "input", "6": "input", "5": "input", "3": "output", "7": "open_collector" },
+  lm358_soic8: { "3": "input", "2": "input", "5": "input", "6": "input", "1": "output", "7": "output", "8": "power_in", "4": "power_in" },
+  ams1117_33: { "3": "power_in", "1": "power_in", "2": "power_out", "4": "power_out" },
+  usb_c_power: { A4: "power_out", A6: "bidirectional", A7: "bidirectional" },
+  sim_vsource: { "1": "power_out", "2": "passive" },
+};
+for (const p of PARTS) {
+  const map = PIN_TYPES[p.id];
+  for (const pin of p.symbol.pins) {
+    if (map?.[pin.id]) pin.type = map[pin.id];
+    else if (p.id.startsWith("atmega")) pin.type = /VCC|GND/.test(pin.name) ? "power_in" : pin.name === "AREF" ? "passive" : /RESET|XTAL1|ADC/.test(pin.name) ? "input" : /XTAL2/.test(pin.name) ? "output" : "bidirectional";
+    else pin.type ??= "passive";
+  }
+}
 
 const BY_ID = new Map(PARTS.map((p) => [p.id, p]));
 /** Project-specific parts (created by users/the copilot or imported from KiCad), keyed by globally unique id. */
@@ -307,7 +368,7 @@ export interface PartSpec {
   mpn?: string;
   keywords?: string[];
   /** Pins as [number, name]; `side` defaults to left for the first half, right for the rest. */
-  pins: { number: string; name: string; side?: "left" | "right" }[];
+  pins: { number: string; name: string; side?: "left" | "right"; type?: PinType }[];
   package: PackageSpec;
 }
 
@@ -354,7 +415,12 @@ export function buildPart(spec: PartSpec, id = `custom_${Date.now().toString(36)
     defaultValue: spec.value ?? spec.name,
     mpn: spec.mpn,
     keywords: spec.keywords ?? [],
-    symbol: icSymbol(left, right, spec.pins.length > 3 ? spec.name.slice(0, 14) : ""),
+    symbol: withTypes(icSymbol(left, right, spec.pins.length > 3 ? spec.name.slice(0, 14) : ""), spec.pins),
     footprint,
   };
+}
+
+function withTypes(sym: PartSymbol, pins: { number: string; type?: PinType }[]): PartSymbol {
+  for (const p of sym.pins) p.type = pins.find((x) => x.number === p.id)?.type ?? "passive";
+  return sym;
 }

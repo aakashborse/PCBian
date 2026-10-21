@@ -1,4 +1,4 @@
-import { copperLayers, getPart, padsOf, type ComponentData, type CopperLayer } from "@pcbian/core";
+import { boardOutline, copperLayers, getPart, padsOf, type ComponentData, type CopperLayer } from "@pcbian/core";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -119,7 +119,7 @@ export function Board3D() {
         }
       });
     }
-    const { width: W, height: H, thickness: T } = design.board;
+    const { thickness: T } = design.board;
     const mat = (color: number, extra: Partial<THREE.MeshStandardMaterialParameters> = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.05, ...extra });
     const gold = mat(0xd4a64a, { metalness: 0.85, roughness: 0.3 });
     const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number) => {
@@ -130,7 +130,14 @@ export function Board3D() {
     };
 
     // Board (FR-4 core with green soldermask).
-    box(W, T, H, mat(0x0f5132, { roughness: 0.45 }), W / 2, -T / 2, H / 2);
+    // Extruded from the real outline so shaped boards and cutouts show correctly.
+    const v2 = (pts: { x: number; y: number }[]) => pts.map((p) => new THREE.Vector2(p.x, p.y));
+    const boardShape = new THREE.Shape(v2(boardOutline(design.board)));
+    for (const c of design.board.cutouts ?? []) if (c.length >= 3) boardShape.holes.push(new THREE.Path(v2(c)));
+    const boardMesh = new THREE.Mesh(new THREE.ExtrudeGeometry(boardShape, { depth: T, bevelEnabled: false, curveSegments: 4 }), mat(0x0f5132, { roughness: 0.45 }));
+    // Shape XY maps to world XZ; the extrusion runs from y=0 down to y=-T.
+    boardMesh.rotation.x = Math.PI / 2;
+    g.add(boardMesh);
 
     // Copper pours and traces show through the mask as slightly lighter green.
     const layers = copperLayers(design.board);

@@ -1,5 +1,5 @@
 // Copper connectivity, ratsnest, copper pour (zone) fills and design-rule checks.
-import { copperLayers, netRules } from "./doc";
+import { boardOutline, copperLayers, netRules } from "./doc";
 import {
   courtyardRect,
   dist,
@@ -11,12 +11,13 @@ import {
   rectsOverlap,
   segmentRectDistance,
   segmentSegmentDistance,
-  type Rect,
+  toWorld,
   type WorldPad,
 } from "./geometry";
 import { getPart } from "./library";
 import { computeNets, netByTerminal, termKey, UnionFind } from "./netlist";
-import { ALL_COPPER, type CopperLayer, type Design, type Issue, type Net, type Trace, type Vec, type Via, type Zone } from "./types";
+import { computeZoneFill, teardrops, type Cutout, type ZoneFill } from "./zones";
+import { ALL_COPPER, type CopperLayer, type Design, type Issue, type Net, type PinType, type Trace, type Vec, type Via, type Zone } from "./types";
 
 export type CopperItem =
   | { kind: "pad"; key: string; pad: WorldPad; net?: string }
@@ -61,16 +62,6 @@ function gap(a: CopperItem, b: CopperItem): number {
 
 const sharedLayers = (a: CopperItem, b: CopperItem): CopperLayer[] => ALL_COPPER.filter((l) => itemOnLayer(a, l) && itemOnLayer(b, l));
 
-function itemTouchesZone(it: CopperItem, z: Zone): boolean {
-  if (!itemOnLayer(it, z.layer)) return false;
-  if (it.kind === "pad") {
-    const r = padRect(it.pad);
-    return pointInPolygon(it.pad.world, z.points) || polylineTouchesPolygon([{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }], z.points);
-  }
-  if (it.kind === "via") return pointInPolygon(it.via, z.points);
-  return polylineTouchesPolygon(it.trace.points, z.points);
-}
-
 export interface CopperAnalysis {
   nets: Net[];
   items: CopperItem[];
@@ -82,6 +73,8 @@ export interface CopperAnalysis {
   pairs: { a: CopperItem; b: CopperItem; gap: number }[];
   /** Net carried by an item (from its pads or zone), when unambiguous. */
   netOfItem: (it: CopperItem) => string | undefined;
+  /** Computed copper pour fills by zone id. */
+  fills: Map<string, ZoneFill>;
 }
 
 export function analyzeCopper(design: Design, nets = computeNets(design)): CopperAnalysis {
@@ -122,24 +115,34 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
     return m;
   };
 
-  // Zones: a pour connects every same-net item it overlaps; other-net copper is cleared out of the fill.
+  // Zones: each surviving fill island joins the same-net copper it touches.
+  const fills = new Map<string, ZoneFill>();
+  const islandKeys: { key: string; net: string }[] = [];
   if (design.zones.length) {
     const pre = netsOfRoot();
+    const netPre = (it: CopperItem) => {
+      if (it.kind === "pad" && it.net) return it.net;
+      const s = pre.get(uf.find(it.key));
+      return s && s.size === 1 ? [...s][0] : undefined;
+    };
     for (const z of design.zones) {
-      const zk = `zone:${z.id}`;
-      uf.find(zk);
-      for (const it of items) {
-        if (pre.get(uf.find(it.key))?.has(z.net) && itemTouchesZone(it, z)) uf.union(zk, it.key);
-      }
+      const fill = computeZoneFill(design, z, items, netPre as (it: unknown) => string | undefined);
+      fills.set(z.id, fill);
+      fill.islands.forEach((members, k) => {
+        const key = `zone:${z.id}:${k}`;
+        uf.find(key);
+        for (const m of members) uf.union(key, m);
+        islandKeys.push({ key, net: z.net });
+      });
     }
   }
 
   const clusterOf = new Map<string, string>();
   for (const it of items) clusterOf.set(it.key, uf.find(it.key));
-  for (const z of design.zones) clusterOf.set(`zone:${z.id}`, uf.find(`zone:${z.id}`));
+  for (const z of islandKeys) clusterOf.set(z.key, uf.find(z.key));
   const clusterNets = netsOfRoot();
-  for (const z of design.zones) {
-    const r = uf.find(`zone:${z.id}`);
+  for (const z of islandKeys) {
+    const r = uf.find(z.key);
     if (!clusterNets.has(r)) clusterNets.set(r, new Set());
     clusterNets.get(r)!.add(z.net);
   }
@@ -148,32 +151,22 @@ export function analyzeCopper(design: Design, nets = computeNets(design)): Coppe
     const s = clusterNets.get(clusterOf.get(it.key)!);
     return s && s.size === 1 ? [...s][0] : undefined;
   };
-  return { nets, items, clusterOf, clusterNets, pairs, netOfItem };
+  return { nets, items, clusterOf, clusterNets, pairs, netOfItem, fills };
 }
 
 // ---------- zone fills ----------
 
-export type Cutout = { kind: "rect"; rect: Rect } | { kind: "circle"; c: Vec; r: number } | { kind: "line"; points: Vec[]; width: number };
+export type { Cutout, ZoneFill };
 
-/** The copper a zone actually fills is its outline minus these clearance cut-outs around other-net copper. */
-export function zoneCutouts(design: Design, zone: Zone, analysis = analyzeCopper(design)): Cutout[] {
-  const zRules = netRules(design, zone.net);
-  const out: Cutout[] = [];
-  const zoneCluster = analysis.clusterOf.get(`zone:${zone.id}`);
-  for (const it of analysis.items) {
-    if (!itemOnLayer(it, zone.layer)) continue;
-    if (analysis.clusterOf.get(it.key) === zoneCluster) continue;
-    const net = analysis.netOfItem(it);
-    if (net === zone.net) continue;
-    const cl = Math.max(zRules.clearance, netRules(design, net).clearance);
-    if (it.kind === "pad") {
-      const r = padRect(it.pad);
-      if (it.pad.shape === "circle") out.push({ kind: "circle", c: it.pad.world, r: Math.min(it.pad.ww, it.pad.wh) / 2 + cl });
-      else out.push({ kind: "rect", rect: { x0: r.x0 - cl, y0: r.y0 - cl, x1: r.x1 + cl, y1: r.y1 + cl } });
-    } else if (it.kind === "via") out.push({ kind: "circle", c: it.via, r: it.via.diameter / 2 + cl });
-    else out.push({ kind: "line", points: it.trace.points, width: it.trace.width + 2 * cl });
-  }
-  return out;
+/** The computed fill of a pour (outline minus cut-outs, plus spokes, minus removed islands). */
+export function zoneFill(design: Design, zone: Zone, analysis = analyzeCopper(design)): ZoneFill {
+  return analysis.fills.get(zone.id) ?? computeZoneFill(design, zone, analysis.items, analysis.netOfItem as (it: unknown) => string | undefined);
+}
+
+/** Teardrop polygons for the board (empty unless board.teardrops is enabled). */
+export function boardTeardrops(design: Design, analysis = analyzeCopper(design)) {
+  if (!design.board.teardrops) return [];
+  return teardrops(design, analysis.items, (a, b) => analysis.clusterOf.get(a) === analysis.clusterOf.get(b));
 }
 
 // ---------- ratsnest ----------
@@ -233,7 +226,11 @@ const itemPos = (it: CopperItem): Vec => (it.kind === "pad" ? it.pad.world : it.
 export function runDrc(design: Design): Issue[] {
   const issues: Issue[] = [];
   const analysis = analyzeCopper(design);
-  const board: Rect = { x0: 0, y0: 0, x1: design.board.width, y1: design.board.height };
+  const outline = boardOutline(design.board);
+  const holes = design.board.cutouts ?? [];
+  const insideBoard = (p: Vec) => pointInPolygon(p, outline) && !holes.some((h) => pointInPolygon(p, h));
+  const edges = [outline, ...holes].flatMap((poly) => poly.map((p, i) => [p, poly[(i + 1) % poly.length]] as [Vec, Vec]));
+  const edgeDistance = (a: Vec, b: Vec) => Math.min(...edges.map(([p, q]) => segmentSegmentDistance(a, b, p, q)));
   const layers = copperLayers(design.board);
 
   // Shorts: a copper island that joins pads of different nets.
@@ -272,8 +269,12 @@ export function runDrc(design: Design): Issue[] {
   const placed = design.components.filter((c) => getPart(c.partId)?.footprint);
   for (const c of placed) {
     const r = courtyardRect(c)!;
-    if (r.x0 < board.x0 || r.y0 < board.y0 || r.x1 > board.x1 || r.y1 > board.y1) {
+    const corners = [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }];
+    // Pads off the board are a real error; a body overhanging the edge (edge connectors) only warrants a check.
+    if (padsOf(c).some((pd) => !insideBoard(pd.world))) {
       issues.push({ severity: "error", code: "outside_board", message: `${c.ref} is outside the board outline (drag it onto the board or use Auto-place)`, at: { x: c.pcb.x, y: c.pcb.y }, refs: [c.ref] });
+    } else if (corners.some((p) => !insideBoard(p))) {
+      issues.push({ severity: "warning", code: "overhang", message: `${c.ref} overhangs the board edge (fine for edge connectors)`, at: { x: c.pcb.x, y: c.pcb.y }, refs: [c.ref] });
     }
   }
   for (let i = 0; i < placed.length; i++) {
@@ -294,10 +295,39 @@ export function runDrc(design: Design): Issue[] {
     if (!layers.includes(t.layer)) issues.push({ severity: "error", code: "layer", message: `Trace on ${t.layer} but the board has ${design.board.layers} layers`, at: t.points[0] });
     if (t.width < 0.15) issues.push({ severity: "warning", code: "trace_width", message: `Trace width ${t.width}mm is below the 0.15mm manufacturing minimum`, at: t.points[0] });
     else if (t.width + 1e-9 < rules.traceWidth) issues.push({ severity: "warning", code: "netclass_width", message: `Trace width ${t.width}mm is narrower than net class ${rules.className} (${rules.traceWidth}mm)`, at: t.points[0] });
-    if (t.points.some((p) => p.x < board.x0 || p.y < board.y0 || p.x > board.x1 || p.y > board.y1)) {
+    if (t.points.some((p) => !insideBoard(p))) {
       issues.push({ severity: "error", code: "trace_outside", message: "Trace runs outside the board outline", at: t.points[0] });
+    } else {
+      const d = Math.min(...segs(t).map(([a, b]) => edgeDistance(a, b)));
+      if (d - t.width / 2 < EDGE_CLEAR - 1e-9) issues.push({ severity: "error", code: "edge_clearance", message: `Trace is ${(d - t.width / 2).toFixed(2)}mm from the board edge (minimum ${EDGE_CLEAR}mm)`, at: t.points[0] });
+    }
+    // Acid traps: acute angles between consecutive segments trap etchant.
+    for (let i = 1; i < t.points.length - 1; i++) {
+      const a = t.points[i - 1];
+      const b = t.points[i];
+      const c = t.points[i + 1];
+      const v1 = { x: a.x - b.x, y: a.y - b.y };
+      const v2 = { x: c.x - b.x, y: c.y - b.y };
+      const cos = (v1.x * v2.x + v1.y * v2.y) / (Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y) || 1);
+      if (cos > 0.0001) issues.push({ severity: "warning", code: "acid_trap", message: `Acute trace corner (${Math.round((Math.acos(Math.min(1, cos)) * 180) / Math.PI)}°) may trap etchant`, at: b });
+    }
+    // Keepouts.
+    for (const k of design.keepouts) {
+      if (!k.noTracks || !k.layers.includes(t.layer)) continue;
+      if (polylineTouchesPolygon(t.points, k.points)) issues.push({ severity: "error", code: "keepout", message: `Trace on ${t.layer} enters a no-tracks keepout`, at: t.points[0] });
     }
   }
+  for (const v of design.vias) {
+    for (const k of design.keepouts) if (k.noVias && pointInPolygon(v, k.points)) issues.push({ severity: "error", code: "keepout", message: "Via inside a no-vias keepout", at: v });
+    if (!insideBoard(v)) issues.push({ severity: "error", code: "via_outside", message: "Via outside the board outline", at: v });
+  }
+  for (const it of analysis.items) {
+    if (it.kind !== "pad") continue;
+    const r = padRect(it.pad);
+    const d = Math.min(edgeDistance({ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }), edgeDistance({ x: r.x1, y: r.y0 }, { x: r.x1, y: r.y1 }), edgeDistance({ x: r.x1, y: r.y1 }, { x: r.x0, y: r.y1 }), edgeDistance({ x: r.x0, y: r.y1 }, { x: r.x0, y: r.y0 }));
+    if (insideBoard(it.pad.world) && d < EDGE_CLEAR - 1e-9) issues.push({ severity: "warning", code: "edge_clearance", message: `${it.pad.ref} pad ${it.pad.id} is ${d.toFixed(2)}mm from the board edge`, at: it.pad.world, refs: [it.pad.ref] });
+  }
+  issues.push(...silkAndMaskChecks(design, analysis));
   for (const v of design.vias) {
     if (v.drill < 0.2) issues.push({ severity: "warning", code: "via_drill", message: `Via drill ${v.drill}mm is below the 0.2mm manufacturing minimum`, at: v });
     if (v.diameter - v.drill < 0.2) issues.push({ severity: "warning", code: "annular_ring", message: `Via annular ring ${((v.diameter - v.drill) / 2).toFixed(2)}mm is below 0.1mm`, at: v });
@@ -323,7 +353,8 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
         issues.push({ severity: "warning", code: "nc_connected", message: `${c.ref} pin ${t.pin} is marked no-connect but is wired to net ${n.name}`, refs: [c.ref] });
       }
     }
-    if (n.terminals.length === 1 && phys.length === 1 && !isNc(phys[0])) {
+    // Mounting holes and fiducials may be left floating; they are mechanical, not circuit pins.
+    if (n.terminals.length === 1 && phys.length === 1 && !isNc(phys[0]) && getPart(byId.get(phys[0].comp)!.partId)?.category !== "Mechanical") {
       const c = byId.get(phys[0].comp)!;
       const pin = getPart(c.partId)!.symbol.pins.find((p) => p.id === phys[0].pin);
       issues.push({ severity: "warning", code: "unconnected_pin", message: `${c.ref} pin ${phys[0].pin} (${pin?.name}) is not connected`, refs: [c.ref] });
@@ -335,9 +366,127 @@ export function runErc(design: Design, nets = computeNets(design)): Issue[] {
   const refs = new Map<string, number>();
   for (const c of design.components) if (getPart(c.partId)?.kind === "part") refs.set(c.ref, (refs.get(c.ref) ?? 0) + 1);
   for (const [ref, n] of refs) if (n > 1) issues.push({ severity: "error", code: "duplicate_ref", message: `Reference ${ref} is used ${n} times`, refs: [ref] });
+  issues.push(...pinTypeErc(design, nets), ...hierarchyErc(design));
   const sheetIds = new Set(design.sheets.map((s) => s.id));
   for (const c of design.components) {
     if (c.sheet && !sheetIds.has(c.sheet)) issues.push({ severity: "error", code: "orphan_sheet", message: `${c.ref} is on a sheet that no longer exists`, refs: [c.ref] });
+  }
+  return issues;
+}
+
+// ---------- ERC: pin-type conflict matrix ----------
+
+const DRIVERS = new Set<PinType>(["output", "bidirectional", "tristate", "power_out", "open_collector", "passive", "unspecified"]);
+
+/** KiCad/Altium-style pin conflict checks: competing outputs, undriven inputs, undriven power pins. */
+export function pinTypeErc(design: Design, nets: Net[]): Issue[] {
+  const issues: Issue[] = [];
+  const byId = new Map(design.components.map((c) => [c.id, c]));
+  for (const n of nets) {
+    const pins = n.terminals.flatMap((t) => {
+      const c = byId.get(t.comp)!;
+      const part = getPart(c.partId)!;
+      if (part.kind !== "part" || c.noConnect?.includes(t.pin)) return [];
+      const pin = part.symbol.pins.find((p) => p.id === t.pin);
+      return pin ? [{ ref: c.ref, pin: t.pin, name: pin.name, type: (pin.type ?? "passive") as PinType }] : [];
+    });
+    if (pins.length < 1) continue;
+    const of = (...types: PinType[]) => pins.filter((p) => types.includes(p.type));
+    const label = (p: (typeof pins)[number]) => `${p.ref}.${p.pin} (${p.name})`;
+    const hasPowerSymbol = n.terminals.some((t) => getPart(byId.get(t.comp)!.partId)?.kind === "power");
+    const outs = of("output");
+    const pouts = of("power_out");
+    if (outs.length > 1) issues.push({ severity: "error", code: "pin_conflict", message: `Net ${n.name}: outputs ${outs.map(label).join(", ")} drive each other`, refs: outs.map((p) => p.ref) });
+    if (outs.length && pouts.length) issues.push({ severity: "error", code: "pin_conflict", message: `Net ${n.name}: output ${label(outs[0])} is connected to power output ${label(pouts[0])}`, refs: [outs[0].ref, pouts[0].ref] });
+    if (pouts.length > 1) issues.push({ severity: "error", code: "pin_conflict", message: `Net ${n.name}: power outputs ${pouts.map(label).join(", ")} are shorted together`, refs: pouts.map((p) => p.ref) });
+    if (outs.length && of("open_collector", "tristate").length) issues.push({ severity: "warning", code: "pin_conflict", message: `Net ${n.name}: push-pull output ${label(outs[0])} shares the net with ${label(of("open_collector", "tristate")[0])}`, refs: [outs[0].ref] });
+    const inputs = of("input");
+    if (inputs.length && !pins.some((p) => DRIVERS.has(p.type)) && n.terminals.length > 1) {
+      issues.push({ severity: "warning", code: "undriven_input", message: `Net ${n.name}: input ${inputs.map(label).join(", ")} is not driven by any output`, refs: inputs.map((p) => p.ref) });
+    }
+    const pins_in = of("power_in");
+    if (pins_in.length && !pouts.length && !hasPowerSymbol && n.terminals.length > 1) {
+      issues.push({ severity: "warning", code: "undriven_power", message: `Net ${n.name}: power input ${label(pins_in[0])} has no power source (add a power symbol or a regulator output)`, refs: [pins_in[0].ref] });
+    }
+  }
+  return issues;
+}
+
+/** Hierarchy checks: recursive sheet symbols, repeated instances, unused hierarchical ports. */
+export function hierarchyErc(design: Design): Issue[] {
+  const issues: Issue[] = [];
+  const first = design.sheets[0]?.id;
+  const sheetOfC = (c: { sheet?: string }) => c.sheet ?? first;
+  const children = new Map<string, string[]>();
+  const instances = new Map<string, number>();
+  for (const c of design.components) {
+    if (getPart(c.partId)?.kind !== "sheet") continue;
+    const parent = sheetOfC(c)!;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent)!.push(c.value);
+    instances.set(c.value, (instances.get(c.value) ?? 0) + 1);
+  }
+  const name = (id: string) => design.sheets.find((s) => s.id === id)?.name ?? id;
+  // Cycle detection (DFS).
+  const state = new Map<string, number>();
+  const visit = (s: string, path: string[]): void => {
+    if (state.get(s) === 1) {
+      issues.push({ severity: "error", code: "sheet_recursion", message: `Sheet hierarchy is recursive: ${[...path, s].map(name).join(" → ")}` });
+      return;
+    }
+    if (state.get(s) === 2) return;
+    state.set(s, 1);
+    for (const ch of children.get(s) ?? []) visit(ch, [...path, s]);
+    state.set(s, 2);
+  };
+  for (const s of design.sheets) visit(s.id, []);
+  for (const [sheet, n] of instances) {
+    if (n > 1) issues.push({ severity: "warning", code: "sheet_reuse", message: `Sheet "${name(sheet)}" is instantiated ${n} times; instances share the same nets (repeated channels are not supported yet)` });
+  }
+  return issues;
+}
+
+const EDGE_CLEAR = 0.3;
+
+/** Silkscreen over pads (it gets clipped at fabrication) and solder-mask webs too thin to manufacture. */
+export function silkAndMaskChecks(design: Design, analysis: CopperAnalysis): Issue[] {
+  const issues: Issue[] = [];
+  const pads = analysis.items.filter((it): it is Extract<CopperItem, { kind: "pad" }> => it.kind === "pad").map((it) => it.pad);
+  for (const c of design.components) {
+    const part = getPart(c.partId);
+    if (!part?.footprint) continue;
+    const side = c.pcb.side;
+    const mirror = side === "bottom";
+    let flagged = false;
+    for (const sh of part.footprint.silk) {
+      if (flagged) break;
+      const pts = sh.kind === "line" ? sh.points : sh.kind === "polygon" ? [...sh.points, sh.points[0]] : sh.kind === "rect" ? [{ x: sh.x, y: sh.y }, { x: sh.x + sh.w, y: sh.y }, { x: sh.x + sh.w, y: sh.y + sh.h }, { x: sh.x, y: sh.y + sh.h }, { x: sh.x, y: sh.y }] : [];
+      const world = pts.map((p) => toWorld(p, c.pcb, mirror));
+      for (const pad of pads) {
+        if (!pad.layers.includes(side)) continue;
+        const r = padRect(pad);
+        const rr = { x0: r.x0 - 0.05, y0: r.y0 - 0.05, x1: r.x1 + 0.05, y1: r.y1 + 0.05 };
+        if (world.slice(1).some((p, i) => segmentRectDistance(world[i], p, rr) === 0)) {
+          issues.push({ severity: "warning", code: "silk_over_pad", message: `${c.ref} silkscreen overlaps ${pad.ref} pad ${pad.id} (it will be clipped)`, at: pad.world, refs: [c.ref] });
+          flagged = true;
+          break;
+        }
+      }
+    }
+  }
+  // Mask webs: openings are pads grown by 0.05mm; a web thinner than 0.1mm cannot be printed.
+  for (let i = 0; i < pads.length; i++) {
+    for (let j = i + 1; j < pads.length; j++) {
+      const a = pads[i];
+      const b = pads[j];
+      if (!a.layers.some((l) => b.layers.includes(l) && (l === "top" || l === "bottom"))) continue;
+      const ra = padRect(a);
+      const rb = padRect(b);
+      const dx = Math.max(0, ra.x0 - rb.x1, rb.x0 - ra.x1);
+      const dy = Math.max(0, ra.y0 - rb.y1, rb.y0 - ra.y1);
+      const web = Math.hypot(dx, dy) - 0.1;
+      if (web > 0 && web < 0.1 - 1e-9) issues.push({ severity: "warning", code: "mask_sliver", message: `Solder-mask web between ${a.ref}.${a.id} and ${b.ref}.${b.id} is only ${web.toFixed(3)}mm`, at: a.world, refs: [a.ref] });
+    }
   }
   return issues;
 }

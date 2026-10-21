@@ -44,6 +44,37 @@ export function Dashboard() {
           {copilot === false && " (The AI copilot is disabled until ANTHROPIC_API_KEY is set on the server.)"}
         </p>
         <div className="templates">
+          <label className="template" style={{ cursor: "pointer", border: "1px dashed #3a4352" }} title="Select .kicad_sch files (all sheets) and/or a .kicad_pcb">
+            <b>⇪ Import KiCad project</b>
+            <span className="muted small">Schematic sheets (.kicad_sch) and/or board (.kicad_pcb), KiCad 6–9.</span>
+            <input
+              type="file"
+              multiple
+              accept=".kicad_sch,.kicad_pcb"
+              style={{ display: "none" }}
+              onChange={async (e) => {
+                const files = [...(e.target.files ?? [])];
+                e.target.value = "";
+                if (!files.length) return;
+                const sch = await Promise.all(files.filter((f) => f.name.endsWith(".kicad_sch")).map(async (f) => ({ name: f.name, text: await f.text() })));
+                const pcbFile = files.find((f) => f.name.endsWith(".kicad_pcb"));
+                const name = (pcbFile ?? files[0]).name.replace(/\.kicad_(sch|pcb)$/, "");
+                try {
+                  setError("Importing…");
+                  const p = await api.importKicad(name, sch, pcbFile ? await pcbFile.text() : undefined);
+                  setError("");
+                  try {
+                    sessionStorage.setItem(`pcbian.import.${p.id}`, JSON.stringify(p.report));
+                  } catch {
+                    // storage unavailable: the report is simply not shown
+                  }
+                  navigate(`/p/${p.id}`);
+                } catch (err) {
+                  setError((err as Error).message);
+                }
+              }}
+            />
+          </label>
           {templates.map((t) => (
             <button key={t.id} className="template" onClick={() => create(t)}>
               <b>{t.id === "blank" ? "+ " : ""}{t.name}</b>

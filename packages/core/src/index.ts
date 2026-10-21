@@ -11,3 +11,6 @@ export * from "./edit";
 export * from "./sim";
 export * from "./font";
 export * from "./kicad";
+export * from "./pdf";
+export * from "./zones";
+export * from "./kicad-import";

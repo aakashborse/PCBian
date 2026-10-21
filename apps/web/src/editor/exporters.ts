@@ -1,4 +1,4 @@
-import { bomCsv, gerberFiles, kicadNetlist, kicadPcb, netlistText, pickAndPlaceCsv, type Design } from "@pcbian/core";
+import { assemblyPdf, bomCsv, gerberFiles, kicadNetlist, kicadPcb, netlistText, pickAndPlaceCsv, schematicPdf, type Design } from "@pcbian/core";
 import JSZip from "jszip";
 
 function download(name: string, data: Blob) {
@@ -18,6 +18,8 @@ export const exporters = {
   pnp: (d: Design) => download(`${safe(d.name)}-pos.csv`, new Blob([pickAndPlaceCsv(d)], { type: "text/csv" })),
   kicadPcb: (d: Design) => download(`${safe(d.name)}.kicad_pcb`, new Blob([kicadPcb(d)], { type: "text/plain" })),
   kicadNet: (d: Design) => download(`${safe(d.name)}.net`, new Blob([kicadNetlist(d)], { type: "text/plain" })),
+  schematicPdf: (d: Design) => download(`${safe(d.name)}-schematic.pdf`, new Blob([schematicPdf(d) as BlobPart], { type: "application/pdf" })),
+  assemblyPdf: (d: Design) => download(`${safe(d.name)}-assembly.pdf`, new Blob([assemblyPdf(d) as BlobPart], { type: "application/pdf" })),
   json: (d: Design) => download(`${safe(d.name)}.pcbian.json`, new Blob([JSON.stringify(d, null, 2)], { type: "application/json" })),
   async gerbers(d: Design) {
     const zip = new JSZip();
@@ -26,6 +28,8 @@ export const exporters = {
     zip.file(`${named.name}-bom.csv`, bomCsv(d));
     zip.file(`${named.name}-pos.csv`, pickAndPlaceCsv(d));
     zip.file(`${named.name}.kicad_pcb`, kicadPcb(named));
+    zip.file(`${named.name}-schematic.pdf`, schematicPdf(d));
+    zip.file(`${named.name}-assembly.pdf`, assemblyPdf(d));
     download(`${named.name}-fabrication.zip`, await zip.generateAsync({ type: "blob" }));
   },
 };
