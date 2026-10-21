@@ -237,3 +237,21 @@ describe("multi-unit parts", () => {
     expect(padsOf(c)).toHaveLength(8);
   });
 });
+
+describe("pin-type ERC", () => {
+  it("treats several output pins of one part on a net as one driver", async () => {
+    const Y = await import("yjs");
+    const { addComponent, attachNet, getDesign, initDoc, runErc } = await import("../src");
+    const doc = new Y.Doc();
+    initDoc(doc, "ldo");
+    const u = addComponent(doc, "ams1117_33", { x: 0, y: 0 });
+    for (const pin of ["2", "4"]) attachNet(doc, `${u.ref}.${pin}`, "+3V3");
+    attachNet(doc, `${u.ref}.1`, "GND");
+    attachNet(doc, `${u.ref}.3`, "+5V");
+    expect(runErc(getDesign(doc)).filter((i) => i.code === "pin_conflict")).toEqual([]);
+    // Two different regulators on one rail are still a conflict.
+    const u2 = addComponent(doc, "ams1117_33", { x: 100, y: 0 });
+    attachNet(doc, `${u2.ref}.2`, "+3V3");
+    expect(runErc(getDesign(doc)).some((i) => i.code === "pin_conflict")).toBe(true);
+  });
+});

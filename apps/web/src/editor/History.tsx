@@ -5,6 +5,7 @@ import { api, type VersionMeta } from "../lib/api";
 import { navigate } from "../lib/router";
 import { useUser } from "../lib/user";
 import { useEditor } from "./context";
+import { Releases } from "./Releases";
 
 const when = (t: number) => new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
@@ -63,7 +64,8 @@ export function HistoryPanel() {
   const shown = (list ?? []).filter((v) => showAuto || !v.auto);
   return (
     <div className="panel-body">
-      <h4 style={{ marginTop: 0 }}>Version history</h4>
+      <Releases onChange={refresh} />
+      <h4 style={{ margin: "14px 0 6px" }}>Version history</h4>
       <div className="row" style={{ gap: 4, marginBottom: 10 }}>
         <input placeholder="Version name, e.g. Rev A for review" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && save()} style={{ flex: 1, minWidth: 0 }} />
         <button className="primary small" onClick={save}>

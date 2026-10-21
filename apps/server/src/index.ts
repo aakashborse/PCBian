@@ -11,6 +11,7 @@ import { createProjectMeta, deleteProjectMeta, getProject, listProjects, updateP
 import { buildTemplate, TEMPLATES, type TemplateId } from "./templates.js";
 import { mouser } from "./supplier.js";
 import { MAX_MODEL_BYTES, modelPath, saveModel } from "./models.js";
+import { decide, deleteReleases, listReleases, packageFile, ReleaseError, requestRelease, suggestedRevision, withdraw } from "./releases.js";
 import { deleteVersions, diffVersion, listVersions, restoreVersion, saveVersion, versionUpdate } from "./versions.js";
 import * as Y from "yjs";
 
@@ -126,6 +127,7 @@ app.delete("/api/projects/:id", (req, res) => {
   dropRoom(req.params.id);
   deleteProjectMeta(req.params.id);
   deleteVersions(req.params.id);
+  deleteReleases(req.params.id);
   res.status(204).end();
 });
 
@@ -209,6 +211,68 @@ app.post("/api/projects/:id/versions/:vid/branch", (req, res) => {
   room.save();
   saveVersion(room, `Branched from ${p.name}: ${v?.name ?? req.params.vid}`, String(req.body?.author ?? "Someone").slice(0, 40));
   res.status(201).json(meta);
+});
+
+// ----- releases -----
+
+const releaseError = (res: express.Response, e: unknown) => {
+  if (e instanceof ReleaseError) return void res.status(e.status).json({ error: e.message, ...(e.checks ? { checks: e.checks } : {}) });
+  throw e;
+};
+
+app.get("/api/projects/:id/releases", (req, res) => {
+  const p = getProject(req.params.id);
+  if (!p) return void res.status(404).json({ error: "Not found" });
+  res.json({ releases: listReleases(p.id), suggestedRevision: suggestedRevision(getRoom(p.id)) });
+});
+
+app.post("/api/projects/:id/releases", async (req, res) => {
+  const p = getProject(req.params.id);
+  if (!p) return void res.status(404).json({ error: "Not found" });
+  const b = req.body ?? {};
+  try {
+    const r = await requestRelease(getRoom(p.id), {
+      revision: String(b.revision ?? ""),
+      title: b.title ? String(b.title).slice(0, 120) : undefined,
+      notes: b.notes ? String(b.notes).slice(0, 4000) : undefined,
+      approvers: Array.isArray(b.approvers) ? b.approvers.map(String).slice(0, 20) : [],
+      required: Number(b.required) || undefined,
+      author: String(b.author ?? "Someone").slice(0, 40),
+      override: b.override ? String(b.override).slice(0, 500) : undefined,
+    });
+    res.status(201).json(r);
+  } catch (e) {
+    releaseError(res, e);
+  }
+});
+
+app.post("/api/projects/:id/releases/:rid/decision", (req, res) => {
+  const p = getProject(req.params.id);
+  if (!p) return void res.status(404).json({ error: "Not found" });
+  const decision = req.body?.decision === "reject" ? "reject" : req.body?.decision === "approve" ? "approve" : null;
+  if (!decision) return void res.status(400).json({ error: "decision must be approve or reject" });
+  try {
+    res.json(decide(p.id, req.params.rid, { by: String(req.body?.by ?? ""), decision, comment: req.body?.comment ? String(req.body.comment).slice(0, 2000) : undefined }));
+  } catch (e) {
+    releaseError(res, e);
+  }
+});
+
+app.post("/api/projects/:id/releases/:rid/withdraw", (req, res) => {
+  const p = getProject(req.params.id);
+  if (!p) return void res.status(404).json({ error: "Not found" });
+  try {
+    res.json(withdraw(p.id, req.params.rid, String(req.body?.by ?? "")));
+  } catch (e) {
+    releaseError(res, e);
+  }
+});
+
+app.get("/api/projects/:id/releases/:rid/package", (req, res) => {
+  const p = getProject(req.params.id);
+  const r = p && listReleases(p.id).find((x) => x.id === req.params.rid);
+  if (!p || !r || !fs.existsSync(packageFile(p.id, r.id))) return void res.status(404).json({ error: "No package" });
+  res.download(packageFile(p.id, r.id), `${p.name.replace(/[^A-Za-z0-9_.-]+/g, "_")}-rev${r.revision}.zip`);
 });
 
 // Serve the built web app in production.

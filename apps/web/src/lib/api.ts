@@ -1,4 +1,33 @@
-import type { DesignDiff, SupplierOffer } from "@pcbian/core";
+import type { DesignDiff, ReleaseChecks, SupplierOffer } from "@pcbian/core";
+
+export interface Release {
+  id: string;
+  revision: string;
+  title: string;
+  notes: string;
+  versionId: string;
+  status: "in_review" | "released" | "rejected" | "withdrawn";
+  requestedBy: string;
+  requestedAt: number;
+  approvers: string[];
+  required: number;
+  decisions: { by: string; at: number; decision: "approve" | "reject"; comment: string }[];
+  checks: ReleaseChecks;
+  override?: string;
+  files: string[];
+  packageBytes: number;
+  releasedAt?: number;
+}
+
+/** A release request the server refused, with the checks that failed (when that was the reason). */
+export class ReleaseRefused extends Error {
+  constructor(
+    message: string,
+    readonly checks?: ReleaseChecks,
+  ) {
+    super(message);
+  }
+}
 
 export interface ProjectMeta {
   id: string;
@@ -65,6 +94,15 @@ export const api = {
   stopCopilot: (id: string) => call<{ stopped: boolean }>("POST", `/api/projects/${id}/copilot/stop`),
   resetCopilot: (id: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot/reset`),
   versions: (id: string) => call<VersionMeta[]>("GET", `/api/projects/${id}/versions`),
+  releases: (id: string) => call<{ releases: Release[]; suggestedRevision: string }>("GET", `/api/projects/${id}/releases`),
+  async requestRelease(id: string, body: { revision: string; title?: string; notes?: string; approvers: string[]; required: number; author: string; override?: string }): Promise<Release> {
+    const res = await fetch(`/api/projects/${id}/releases`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const out = (await res.json().catch(() => ({}))) as Release & { error?: string; checks?: ReleaseChecks };
+    if (!res.ok) throw new ReleaseRefused(out.error ?? `${res.status}`, out.checks);
+    return out;
+  },
+  decideRelease: (id: string, rid: string, by: string, decision: "approve" | "reject", comment?: string) => call<Release>("POST", `/api/projects/${id}/releases/${rid}/decision`, { by, decision, comment }),
+  withdrawRelease: (id: string, rid: string, by: string) => call<Release>("POST", `/api/projects/${id}/releases/${rid}/withdraw`, { by }),
   saveVersion: (id: string, name: string, author: string) => call<VersionMeta>("POST", `/api/projects/${id}/versions`, { name, author }),
   versionDiff: (id: string, vid: string) => call<{ diff: DesignDiff; summary: string }>("GET", `/api/projects/${id}/versions/${vid}/diff`),
   versionUpdate: async (id: string, vid: string) => {

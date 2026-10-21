@@ -1006,3 +1006,25 @@ fieldset.plain:disabled {
     grid-template-columns: 1fr;
   }
 }
+.life.muted {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--muted);
+}
+a.btn {
+  display: inline-block;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--text);
+  text-decoration: none;
+}
+a.btn:hover {
+  border-color: var(--accent);
+}
+.release-form .field input {
+  min-width: 0;
+}
+.release {
+  margin-bottom: 8px;
+}

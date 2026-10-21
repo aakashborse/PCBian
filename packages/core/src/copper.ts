@@ -633,8 +633,11 @@ export function pinTypeErc(design: Design, nets: Net[]): Issue[] {
     const of = (...types: PinType[]) => pins.filter((p) => types.includes(p.type));
     const label = (p: (typeof pins)[number]) => `${p.ref}.${p.pin} (${p.name})`;
     const hasPowerSymbol = n.terminals.some((t) => getPart(byId.get(t.comp)!.partId)?.kind === "power");
-    const outs = of("output");
-    const pouts = of("power_out");
+    // Several pins of one part driving one net (a regulator's VOUT and its tab, a dual-pin output)
+    // are one driver, not a conflict.
+    const onePerPart = (list: typeof pins) => list.filter((p, i) => list.findIndex((q) => q.ref === p.ref) === i);
+    const outs = onePerPart(of("output"));
+    const pouts = onePerPart(of("power_out"));
     if (outs.length > 1) issues.push({ severity: "error", code: "pin_conflict", message: `Net ${n.name}: outputs ${outs.map(label).join(", ")} drive each other`, refs: outs.map((p) => p.ref) });
     if (outs.length && pouts.length) issues.push({ severity: "error", code: "pin_conflict", message: `Net ${n.name}: output ${label(outs[0])} is connected to power output ${label(pouts[0])}`, refs: [outs[0].ref, pouts[0].ref] });
     if (pouts.length > 1) issues.push({ severity: "error", code: "pin_conflict", message: `Net ${n.name}: power outputs ${pouts.map(label).join(", ")} are shorted together`, refs: pouts.map((p) => p.ref) });

@@ -1,6 +1,7 @@
 // Copilot tools. Each tool validates its input with zod and edits the shared Yjs
 // document through @pcbian/core, so AI edits behave exactly like human edits.
 import {
+  releaseChecks,
   enclosure,
   setEnclosure,
   panelize,
@@ -728,6 +729,13 @@ export const TOOLS = {
       return { ref: c.ref, pins: getPart(sheetPartId(child))!.symbol.pins.map((p) => p.id) };
     },
     label: ({ child_sheet }) => `Sheet symbol for ${child_sheet}`,
+  }),
+  release_readiness: tool({
+    description:
+      "The checks a release is judged by (DRC and ERC errors, unrouted connections, BOM lines without a manufacturer part number), with details. Releases themselves are requested and approved by people in the History panel.",
+    schema: z.object({}),
+    run: (doc) => releaseChecks(getDesign(doc)),
+    label: () => "Release readiness",
   }),
   design_enclosure: tool({
     description:
