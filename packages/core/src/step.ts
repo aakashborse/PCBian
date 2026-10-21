@@ -3,7 +3,8 @@
 import { boardOutline } from "./doc";
 import { courtyardCorners, padsOf, polygonArea } from "./geometry";
 import { getPart } from "./library";
-import type { ComponentData, Design, Vec } from "./types";
+import { modelPlacement, parseStep, renumber, stepRoot, type StepData } from "./model3d";
+import type { ComponentData, Design, Model3D, Vec } from "./types";
 
 type V3 = [number, number, number];
 
@@ -13,6 +14,17 @@ class StepWriter {
   add(s: string): number {
     this.lines.push(`#${++this.n}=${s};`);
     return this.n;
+  }
+  /** Copy another file's entities in, renumbered past everything so far; returns the shift. */
+  merge(data: StepData): number {
+    const by = this.n;
+    let max = 0;
+    for (const [id, body] of data.entities) {
+      this.lines.push(`#${id + by}=${renumber(body, by)};`);
+      max = Math.max(max, id);
+    }
+    this.n += max;
+    return by;
   }
   body() {
     return this.lines.join("\n");
@@ -127,8 +139,12 @@ function circle(c: Vec, r: number, n = 16): Vec[] {
   return Array.from({ length: n }, (_, i) => ({ x: c.x + r * Math.cos((2 * Math.PI * i) / n), y: c.y + r * Math.sin((2 * Math.PI * i) / n) }));
 }
 
-/** STEP AP214 text for the board and its components (mm, board bottom at z = 0, y up). */
-export function stepFile(design: Design): string {
+/**
+ * STEP AP214 text for the board and its components (mm, board bottom at z = 0, y up). Parts whose
+ * footprint has a model, with that file's text in `models` (by file id), are placed as instances of
+ * the model and the file becomes an assembly; other parts are boxes on the board.
+ */
+export function stepFile(design: Design, models: Record<string, string> = {}): string {
   const w = new StepWriter();
   const H = design.board.height;
   const T = design.board.thickness;
@@ -139,9 +155,15 @@ export function stepFile(design: Design): string {
   for (const c of design.components) for (const p of padsOf(c)) if (p.drill && p.drill >= 0.5) holes.push(circle(flip(p.world), p.drill / 2));
   const solids: { id: number; rgb: V3 }[] = [];
   solids.push({ id: prism(w, "PCB", boardOutline(design.board).map(flip), [...(design.board.cutouts ?? []).map((h) => h.map(flip)), ...holes], 0, T), rgb: [0.05, 0.32, 0.2] });
+  const placed: { c: ComponentData; m: Model3D }[] = [];
   for (const c of design.components) {
     const part = getPart(c.partId);
     if (!part?.footprint || c.dnp) continue;
+    const m = part.footprint.model;
+    if (m && models[m.file]) {
+      placed.push({ c, m });
+      continue;
+    }
     const h = bodyHeight(c);
     const corners = courtyardCorners(c, 0.25);
     if (!h || !corners) continue;
@@ -155,10 +177,13 @@ export function stepFile(design: Design): string {
   w.add(`APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#${appCtx})`);
   const prodCtx = w.add(`PRODUCT_CONTEXT('',#${appCtx},'mechanical')`);
   const pdCtx = w.add(`PRODUCT_DEFINITION_CONTEXT('part definition',#${appCtx},'design')`);
-  const product = w.add(`PRODUCT(${str(design.name)},${str(design.name)},'',(#${prodCtx}))`);
-  const pdf = w.add(`PRODUCT_DEFINITION_FORMATION('','',#${product})`);
-  const pd = w.add(`PRODUCT_DEFINITION('design','',#${pdf},#${pdCtx})`);
-  const pds = w.add(`PRODUCT_DEFINITION_SHAPE('','',#${pd})`);
+  const product = (name: string) => {
+    const p = w.add(`PRODUCT(${str(name)},${str(name)},'',(#${prodCtx}))`);
+    const f = w.add(`PRODUCT_DEFINITION_FORMATION('','',#${p})`);
+    const pd = w.add(`PRODUCT_DEFINITION('design','',#${f},#${pdCtx})`);
+    return { pd, pds: w.add(`PRODUCT_DEFINITION_SHAPE('','',#${pd})`) };
+  };
+  const boardProduct = product(placed.length ? `${design.name} PCB` : design.name);
   const lu = w.add("(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.MILLI.,.METRE.))");
   const au = w.add("(NAMED_UNIT(*)PLANE_ANGLE_UNIT()SI_UNIT($,.RADIAN.))");
   const su = w.add("(NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT())");
@@ -167,7 +192,7 @@ export function stepFile(design: Design): string {
   const o = w.add("CARTESIAN_POINT('',(0.,0.,0.))");
   const origin = w.add(`AXIS2_PLACEMENT_3D('',#${o},#${w.add("DIRECTION('',(0.,0.,1.))")},#${w.add("DIRECTION('',(1.,0.,0.))")})`);
   const rep = w.add(`ADVANCED_BREP_SHAPE_REPRESENTATION(${str(design.name)},(${[...solids.map((s) => `#${s.id}`), `#${origin}`].join(",")}),#${ctx})`);
-  w.add(`SHAPE_DEFINITION_REPRESENTATION(#${pds},#${rep})`);
+  w.add(`SHAPE_DEFINITION_REPRESENTATION(#${boardProduct.pds},#${rep})`);
   const styled = solids.map((s) => {
     const col = w.add(`COLOUR_RGB('',${s.rgb.map(num).join(",")})`);
     const fas = w.add(`FILL_AREA_STYLE('',(#${w.add(`FILL_AREA_STYLE_COLOUR('',#${col})`)}))`);
@@ -176,6 +201,37 @@ export function stepFile(design: Design): string {
     return w.add(`STYLED_ITEM('color',(#${psa}),#${s.id})`);
   });
   w.add(`MECHANICAL_DESIGN_GEOMETRIC_PRESENTATION_REPRESENTATION('',(${styled.map((s) => `#${s}`).join(",")}),#${ctx})`);
+
+  if (placed.length) {
+    // Assembly: the board and one instance of a model per part, each placed by a transformation.
+    const top = product(design.name);
+    const axis = (t: V3, z: V3, x: V3) => w.add(`AXIS2_PLACEMENT_3D('',#${w.add(`CARTESIAN_POINT('',(${t.map(num).join(",")}))`)},#${w.add(`DIRECTION('',(${z.map(num).join(",")}))`)},#${w.add(`DIRECTION('',(${x.map(num).join(",")}))`)})`);
+    const topOrigin = axis([0, 0, 0], [0, 0, 1], [1, 0, 0]);
+    const roots = new Map<string, { pd: number; rep: number }>();
+    for (const { m } of placed) {
+      if (roots.has(m.file)) continue;
+      const data = parseStep(models[m.file]);
+      const root = stepRoot(data);
+      const by = w.merge(data);
+      roots.set(m.file, { pd: root.productDefinition + by, rep: root.representation + by });
+    }
+    const instances = placed.map(({ c, m }) => {
+      const a = modelPlacement(c, m, design.board, "step");
+      return { name: c.ref, ...roots.get(m.file)!, at: axis(a.t, a.z, a.x) };
+    });
+    const boardAt = axis([0, 0, 0], [0, 0, 1], [1, 0, 0]);
+    const topRep = w.add(`SHAPE_REPRESENTATION(${str(design.name)},(${[topOrigin, boardAt, ...instances.map((i) => i.at)].map((i) => `#${i}`).join(",")}),#${ctx})`);
+    w.add(`SHAPE_DEFINITION_REPRESENTATION(#${top.pds},#${topRep})`);
+    const link = (n: number, name: string, pd: number, childRep: number, at: number) => {
+      const nauo = w.add(`NEXT_ASSEMBLY_USAGE_OCCURRENCE('${n}',${str(name)},'',#${top.pd},#${pd},$)`);
+      const pds = w.add(`PRODUCT_DEFINITION_SHAPE('','',#${nauo})`);
+      const idt = w.add(`ITEM_DEFINED_TRANSFORMATION('','',#${topOrigin},#${at})`);
+      const rr = w.add(`(REPRESENTATION_RELATIONSHIP('','',#${childRep},#${topRep})REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#${idt})SHAPE_REPRESENTATION_RELATIONSHIP())`);
+      w.add(`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#${rr},#${pds})`);
+    };
+    link(1, "PCB", boardProduct.pd, rep, boardAt);
+    instances.forEach((i, k) => link(k + 2, i.name, i.pd, i.rep, i.at));
+  }
 
   const stamp = new Date().toISOString().slice(0, 19);
   return [

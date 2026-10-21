@@ -32,3 +32,4 @@ export * from "./poly";
 export * from "./supplier";
 export * from "./channels";
 export * from "./symbol-edit";
+export * from "./model3d";

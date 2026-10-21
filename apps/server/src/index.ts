@@ -10,6 +10,7 @@ import { dropRoom, getRoom, roomIdFromRequest, saveAll } from "./rooms.js";
 import { createProjectMeta, deleteProjectMeta, getProject, listProjects, updateProjectMeta } from "./store.js";
 import { buildTemplate, TEMPLATES, type TemplateId } from "./templates.js";
 import { mouser } from "./supplier.js";
+import { MAX_MODEL_BYTES, modelPath, saveModel } from "./models.js";
 import { deleteVersions, diffVersion, listVersions, restoreVersion, saveVersion, versionUpdate } from "./versions.js";
 import * as Y from "yjs";
 
@@ -39,6 +40,23 @@ app.post("/api/supplier/search", async (req, res) => {
   } catch (e) {
     res.status(502).json({ error: (e as Error).message });
   }
+});
+
+// Footprint STEP models: upload (raw body) and download by content id.
+app.post("/api/models", express.raw({ type: () => true, limit: MAX_MODEL_BYTES }), (req, res) => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return void res.status(400).json({ error: "Send the STEP file as the request body" });
+  try {
+    res.json({ id: saveModel(req.body), size: req.body.length });
+  } catch (e) {
+    res.status(400).json({ error: (e as Error).message });
+  }
+});
+app.get("/api/models/:id", (req, res) => {
+  const file = modelPath(req.params.id);
+  if (!file) return void res.status(404).json({ error: "No such model" });
+  // Content-addressed: a given id never changes.
+  res.setHeader("cache-control", "public, max-age=31536000, immutable");
+  res.type("model/step").sendFile(file);
 });
 
 app.get("/api/templates", (_req, res) => {

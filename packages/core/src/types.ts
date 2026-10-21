@@ -87,6 +87,22 @@ export interface Footprint {
   /** Courtyard rectangle, centred on the footprint origin. */
   courtyard: { w: number; h: number };
   silk: Shape[];
+  /** 3D body from an uploaded STEP file. */
+  model?: Model3D;
+}
+
+/**
+ * A footprint's STEP model. Model units are mm with the footprint origin at (0,0,0), +x along the
+ * footprint's x, +y toward the footprint's -y (the usual ECAD model convention) and +z up out of
+ * the board. The model is rotated (about x, then y, then z, in degrees) and then offset.
+ */
+export interface Model3D {
+  /** Content id of the uploaded file (see /api/models). */
+  file: string;
+  /** Original file name, for display. */
+  name: string;
+  offset?: { x: number; y: number; z: number };
+  rotate?: { x: number; y: number; z: number };
 }
 
 /**

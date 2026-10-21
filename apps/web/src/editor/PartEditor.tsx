@@ -1,8 +1,9 @@
-import { addCustomPart, componentsMap, finishSymbol, getPart, icSymbol, packageFootprint, partsMap, type ComponentData, type Footprint, type Pad, type PackageSpec, type PartDef, type PinType, type Shape, type Vec } from "@pcbian/core";
+import { addCustomPart, componentsMap, finishSymbol, getPart, icSymbol, packageFootprint, partsMap, type ComponentData, type Footprint, type Pad, type PackageSpec, type Model3D, type PartDef, type PinType, type Shape, type Vec } from "@pcbian/core";
 import { useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
 import { ShapeEl, SymbolBody } from "./render";
 import { SymbolDraw, type Drawing } from "./SymbolDraw";
+import { uploadModel } from "../lib/models";
 
 const PIN_TYPES: PinType[] = ["passive", "input", "output", "bidirectional", "tristate", "power_in", "power_out", "open_collector", "unspecified", "nc"];
 
@@ -50,6 +51,7 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
   const [pads, setPads] = useState<Pad[]>(() => original.footprint?.pads.map((p) => ({ ...p })) ?? []);
   const [silk, setSilk] = useState<Shape[]>(() => original.footprint?.silk ?? []);
   const [fpName, setFpName] = useState(original.footprint?.name ?? "Custom");
+  const [model3d, setModel3d] = useState<Model3D | undefined>(original.footprint?.model);
   const [selPad, setSelPad] = useState<number | null>(null);
   const [applyAll, setApplyAll] = useState(true);
   const users = design.components.filter((c) => c.partId === original.id);
@@ -97,7 +99,7 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
   const save = () => {
     const blocking = problems.find((p) => /no matching pin|unique|not placed/.test(p));
     if (blocking) return toast(blocking);
-    const footprint: Footprint | null = pads.length ? { name: fpName, pads, courtyard: autoCourtyard(pads), silk } : null;
+    const footprint: Footprint | null = pads.length ? { name: fpName, pads, courtyard: autoCourtyard(pads), silk, ...(model3d ? { model: model3d } : {}) } : null;
     const part: PartDef = {
       ...original,
       id: isCustom ? original.id : `custom_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
@@ -228,7 +230,10 @@ export function PartEditor({ comp, onClose }: { comp: ComponentData; onClose: ()
             {mode === "draw" && drawing ? <SymbolDraw drawing={drawing} onChange={setDrawing} pinTable={pins.map((p) => ({ number: p.number, name: p.name, type: p.type }))} /> : <SymbolPreview part={{ ...original, name, symbol }} />}
           </div>
         ) : (
-          <FootprintEditor pads={pads} setPads={setPads} silk={silk} setSilk={setSilk} sel={selPad} setSel={setSelPad} pinCount={pins.length} fpName={fpName} setFpName={setFpName} />
+          <>
+            <FootprintEditor pads={pads} setPads={setPads} silk={silk} setSilk={setSilk} sel={selPad} setSel={setSelPad} pinCount={pins.length} fpName={fpName} setFpName={setFpName} />
+            <ModelField model={model3d} onChange={setModel3d} />
+          </>
         )}
         {problems.length > 0 && (
           <div className="small" style={{ color: "var(--warn)" }}>
@@ -415,6 +420,57 @@ function FootprintEditor({
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/** The footprint's STEP model: upload, then line it up with offset and rotation. */
+function ModelField({ model, onChange }: { model: Model3D | undefined; onChange: (m: Model3D | undefined) => void }) {
+  const { toast } = useEditor();
+  const [busy, setBusy] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const upload = async (f: File) => {
+    setBusy(true);
+    try {
+      const { id } = await uploadModel(f);
+      onChange({ ...(model ?? {}), file: id, name: f.name });
+      toast(`Model ${f.name} attached; it shows in the 3D view and the STEP export`);
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const v3 = (k: "offset" | "rotate", axis: "x" | "y" | "z") => model?.[k]?.[axis] ?? 0;
+  const set = (k: "offset" | "rotate", axis: "x" | "y" | "z", v: number) => model && onChange({ ...model, [k]: { x: 0, y: 0, z: 0, ...model[k], [axis]: v } });
+  return (
+    <div className="card pe-model">
+      <div className="row" style={{ gap: 6 }}>
+        <b className="small">3D model</b>
+        <span className="muted small">{model ? model.name : "none: the 3D view and STEP export use a generic body"}</span>
+        <span className="spacer" />
+        <input ref={input} type="file" accept=".step,.stp,.STEP,.STP" hidden onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
+        <button className="small" disabled={busy} onClick={() => input.current?.click()}>
+          {busy ? "Uploading…" : model ? "Replace STEP…" : "Upload STEP…"}
+        </button>
+        {model && (
+          <button className="small ghost danger" onClick={() => onChange(undefined)}>
+            Remove
+          </button>
+        )}
+      </div>
+      {model && (
+        <div className="row small" style={{ gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+          <span className="muted">Offset mm</span>
+          {(["x", "y", "z"] as const).map((a) => (
+            <FieldNum key={`o${a}`} label={a} value={v3("offset", a)} onChange={(v) => set("offset", a, v)} />
+          ))}
+          <span className="muted">Rotate °</span>
+          {(["x", "y", "z"] as const).map((a) => (
+            <FieldNum key={`r${a}`} label={a} value={v3("rotate", a)} onChange={(v) => set("rotate", a, v)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

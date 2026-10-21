@@ -1,8 +1,9 @@
-import { boardOutline, copperLayers, getPart, padsOf, type ComponentData, type CopperLayer } from "@pcbian/core";
+import { boardOutline, copperLayers, getPart, modelPlacement, padsOf, type ComponentData, type CopperLayer } from "@pcbian/core";
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useEditor } from "./context";
+import { modelMeshes, type ModelMesh } from "../lib/models";
 
 interface BodyStyle {
   h: number;
@@ -37,8 +38,33 @@ function bodyStyle(c: ComponentData): BodyStyle {
   return { h: 1.5, color: 0x1f2937, scale: 0.75 };
 }
 
+const DEFAULT_MODEL_COLOR: [number, number, number] = [0.55, 0.57, 0.6];
+
+/** Three.js meshes (geometry + materials, shared by every part using the model) for a STEP model. */
+function modelObjects(meshes: ModelMesh[]): { geometry: THREE.BufferGeometry; materials: THREE.Material[] }[] {
+  return meshes.map((m) => {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(m.positions, 3));
+    geometry.setIndex(new THREE.BufferAttribute(m.index, 1));
+    if (m.normals && m.normals.length === m.positions.length) geometry.setAttribute("normal", new THREE.BufferAttribute(m.normals, 3));
+    else geometry.computeVertexNormals();
+    const key = (c: [number, number, number] | null) => (c ?? m.color ?? DEFAULT_MODEL_COLOR).map((v) => v.toFixed(3)).join(",");
+    const colors = [...new Set(m.faces.length ? m.faces.map((f) => key(f.color)) : [key(null)])];
+    const materials = colors.map((k) => {
+      const [r, g, b] = k.split(",").map(Number);
+      return new THREE.MeshStandardMaterial({ color: new THREE.Color(r, g, b), roughness: 0.55, metalness: r > 0.7 && g > 0.6 ? 0.6 : 0.1, side: THREE.DoubleSide });
+    });
+    if (m.faces.length) for (const f of m.faces) geometry.addGroup(f.first * 3, (f.last - f.first + 1) * 3, colors.indexOf(key(f.color)));
+    else geometry.addGroup(0, m.index.length, 0);
+    return { geometry, materials };
+  });
+}
+
 export function Board3D() {
-  const { design } = useEditor();
+  const { design, toast } = useEditor();
+  /** Loaded models by file id (null while loading or after a failure). */
+  const models = useRef(new Map<string, ReturnType<typeof modelObjects> | null>());
+  const [modelsLoaded, setModelsLoaded] = useState(0);
   const host = useRef<HTMLDivElement>(null);
   const three = useRef<{ renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera; controls: OrbitControls; group: THREE.Group } | null>(null);
   const [error, setError] = useState("");
@@ -113,7 +139,7 @@ export function Board3D() {
     for (const child of [...g.children]) {
       g.remove(child);
       child.traverse((o) => {
-        if (o instanceof THREE.Mesh) {
+        if (o instanceof THREE.Mesh && !o.userData.shared) {
           o.geometry.dispose();
           (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => m.dispose());
         }
@@ -192,6 +218,33 @@ export function Board3D() {
         }
       }
       if (c.dnp) continue;
+      // An uploaded STEP model replaces the generic body once it has loaded.
+      const model = part.footprint.model;
+      if (model?.file) {
+        const loaded = models.current.get(model.file);
+        if (loaded === undefined) {
+          models.current.set(model.file, null);
+          modelMeshes(model.file).then(
+            (ms) => {
+              models.current.set(model.file, modelObjects(ms));
+              setModelsLoaded((n) => n + 1);
+            },
+            (e) => toast(`3D model ${model.name}: ${(e as Error).message}`),
+          );
+        }
+        if (loaded) {
+          const a = modelPlacement(c, model, design.board, "view");
+          const m4 = new THREE.Matrix4().set(a.x[0], a.y[0], a.z[0], a.t[0], a.x[1], a.y[1], a.z[1], a.t[1], a.x[2], a.y[2], a.z[2], a.t[2], 0, 0, 0, 1);
+          for (const { geometry, materials } of loaded) {
+            const mesh = new THREE.Mesh(geometry, materials);
+            mesh.userData.shared = true;
+            mesh.matrixAutoUpdate = false;
+            mesh.matrix.copy(m4);
+            g.add(mesh);
+          }
+          continue;
+        }
+      }
       const st = bodyStyle(c);
       // Bodies are built in the footprint frame and turned with the part (any angle).
       const cw = part.footprint.courtyard.w * (st.scale ?? 0.75);
@@ -216,7 +269,8 @@ export function Board3D() {
         g.add(cap);
       }
     }
-  }, [design]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [design, modelsLoaded]);
 
   return (
     <>

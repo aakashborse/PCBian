@@ -1,5 +1,6 @@
 import { assemblyPdf, bomCsv, gerberFiles, ipc2581, kicadNetlist, kicadPcb, netlistText, odbFiles, pickAndPlaceCsv, schematicPdf, schematicSvgs, stepFile, type Design } from "@pcbian/core";
 import JSZip from "jszip";
+import { designModels } from "../lib/models";
 
 function download(name: string, data: Blob) {
   const url = URL.createObjectURL(data);
@@ -20,7 +21,8 @@ export const exporters = {
   kicadNet: (d: Design) => download(`${safe(d.name)}.net`, new Blob([kicadNetlist(d)], { type: "text/plain" })),
   schematicPdf: (d: Design) => download(`${safe(d.name)}-schematic.pdf`, new Blob([schematicPdf(d) as BlobPart], { type: "application/pdf" })),
   assemblyPdf: (d: Design) => download(`${safe(d.name)}-assembly.pdf`, new Blob([assemblyPdf(d) as BlobPart], { type: "application/pdf" })),
-  step: (d: Design) => download(`${safe(d.name)}.step`, new Blob([stepFile(d)], { type: "model/step" })),
+  // Parts with an uploaded model are placed as that model; the rest as boxes.
+  step: async (d: Design) => download(`${safe(d.name)}.step`, new Blob([stepFile(d, await designModels(d))], { type: "model/step" })),
   ipc2581: (d: Design) => download(`${safe(d.name)}.ipc2581.xml`, new Blob([ipc2581(d)], { type: "application/xml" })),
   async odb(d: Design) {
     const zip = new JSZip();
