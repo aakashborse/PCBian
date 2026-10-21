@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
-import { appendChat } from "@pcbian/core";
+import { appendChat, syncChannels } from "@pcbian/core";
 import * as Y from "yjs";
 import { z } from "zod";
 import { TOOLS, type ToolDef, type ToolName } from "./tools.js";
@@ -202,6 +202,8 @@ export async function runCopilot(room: Room, message: string, author: string) {
           const prepared = def.prepare ? await def.prepare(doc, parsed.data as never) : undefined;
           doc.transact(() => {
             out = def.run(doc, parsed.data as never, prepared as never);
+            // Edits to a repeated sheet reach its channels.
+            syncChannels(doc);
           }, "copilot");
           doc.transact(() => tools.push([def.label(parsed.data)]), "copilot");
           results.push({ type: "tool_result", tool_use_id: use.id, content: typeof out === "string" ? out : JSON.stringify(out, null, 1) });

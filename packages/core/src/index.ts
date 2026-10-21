@@ -30,3 +30,4 @@ export * from "./altium-sch";
 export * from "./fabexpect";
 export * from "./poly";
 export * from "./supplier";
+export * from "./channels";

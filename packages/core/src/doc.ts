@@ -4,7 +4,7 @@
 import * as Y from "yjs";
 import { defaultPcbPlacement } from "./geometry";
 import { getPart, icSymbol, registerParts } from "./library";
-import { type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type CommentReply, type ComponentData, type CopperLayer, type DesignComment, type Design, type DiffPair, type LengthGroup, type NetClass, type PcbPlacement, type Placement, type Sheet, type SpiceModel, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
+import { type BoardSettings, type Keepout, type PartDef, type PcbGraphic, type SchGraphic, type TitleBlock, type Variant, type CommentReply, type ComponentData, type CopperLayer, type DesignComment, type Design, type DiffPair, type LengthGroup, type NetClass, type PcbPlacement, type Placement, type Sheet, type Shape, type SpiceModel, type Terminal, type Trace, type Vec, type Via, type Wire, type Zone } from "./types";
 
 export const DEFAULT_BOARD: BoardSettings = { width: 50, height: 40, layers: 2, thickness: 1.6, clearance: 0.2, defaultTraceWidth: 0.25 };
 export const DEFAULT_SHEET: Sheet = { id: "main", name: "Sheet 1" };
@@ -47,7 +47,18 @@ function registerSheetParts(sheets: Sheet[], comps: ComponentData[]) {
       names.slice(half).map((n) => [n, n]),
       sh.name,
     );
+    // Widen the box so the sheet name in the middle clears the pin names on both sides.
+    const rect = sym.shapes[0] as Extract<Shape, { kind: "rect" }>;
+    const halfW = -rect.x;
+    const longest = Math.max(3, ...names.map((n) => n.length));
+    const need = Math.ceil((sh.name.length * 2.4 + longest * 5.5 + 6) / 10) * 10;
+    const grow = names.length ? Math.max(0, need - halfW) : 0;
+    rect.x -= grow;
+    rect.w += 2 * grow;
+    sym.refPos.x -= grow;
+    sym.valuePos.x -= grow;
     for (const p of sym.pins) {
+      p.x += p.side === "left" ? -grow : grow;
       p.showNumber = false;
       p.type = "bidirectional";
     }
@@ -255,7 +266,7 @@ export function boardOutlineZone(board: BoardSettings, inset = 0.5): Vec[] {
 
 // ---------- sheets ----------
 
-function getSheets(doc: Y.Doc): Sheet[] {
+export function getSheets(doc: Y.Doc): Sheet[] {
   const s = meta(doc).get("sheets") as Sheet[] | undefined;
   return s?.length ? s : [DEFAULT_SHEET];
 }
@@ -264,6 +275,10 @@ export function addSheet(doc: Y.Doc, name: string): Sheet {
   const sheet = { id: uid("s"), name };
   meta(doc).set("sheets", [...getSheets(doc), sheet]);
   return sheet;
+}
+
+export function setSheets(doc: Y.Doc, sheets: Sheet[]) {
+  meta(doc).set("sheets", sheets);
 }
 
 export function renameSheet(doc: Y.Doc, id: string, name: string) {
@@ -277,7 +292,14 @@ export function deleteSheet(doc: Y.Doc, id: string) {
   doc.transact(() => {
     const first = sheets[0].id;
     for (const c of [...componentsMap(doc).values()]) if ((c.sheet ?? first) === id) deleteComponent(doc, c.id);
-    const rest = sheets.filter((s) => s.id !== id);
+    // Channel copies of a deleted template stay, as ordinary sheets.
+    const rest = sheets.filter((s) => s.id !== id).map((s) => (s.repeatOf === id ? { ...s, repeatOf: undefined } : s));
+    const detached = new Set(sheets.filter((s) => s.repeatOf === id).map((s) => s.id));
+    if (detached.size) {
+      for (const c of [...componentsMap(doc).values()]) if (c.src && detached.has(c.sheet ?? first)) componentsMap(doc).set(c.id, { ...c, src: undefined });
+      for (const w of [...wiresMap(doc).values()]) if (w.src && w.id.includes("~") && detached.has(w.id.slice(w.id.lastIndexOf("~") + 1))) wiresMap(doc).set(w.id, { ...w, src: undefined });
+      for (const g of [...schGraphicsMap(doc).values()]) if (g.src && detached.has(g.sheet)) schGraphicsMap(doc).set(g.id, { ...g, src: undefined });
+    }
     meta(doc).set("sheets", rest);
     // Components without an explicit sheet belong to the first one; pin them if the first sheet changed.
     if (id === first) for (const c of [...componentsMap(doc).values()]) if (!c.sheet) componentsMap(doc).set(c.id, { ...c, sheet: rest[0].id });
@@ -410,7 +432,8 @@ export function annotate(doc: Y.Doc): Map<string, string> {
   const comps = [...componentsMap(doc).values()];
   const groups = new Map<string, ComponentData[]>();
   for (const c of comps) {
-    if (getPart(c.partId)?.kind !== "part") continue;
+    // Channel copies take their designators from the template (see syncChannels).
+    if (getPart(c.partId)?.kind !== "part" || c.src) continue;
     const m = c.ref.match(/^([A-Za-z#]+)/);
     const prefix = m ? m[1] : "X";
     if (!groups.has(prefix)) groups.set(prefix, []);

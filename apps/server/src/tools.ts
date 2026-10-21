@@ -1,6 +1,9 @@
 // Copilot tools. Each tool validates its input with zod and edits the shared Yjs
 // document through @pcbian/core, so AI edits behave exactly like human edits.
 import {
+  addChannels,
+  detachChannel,
+  replicateLayout,
   addComponent,
   addComment,
   addSpiceModels,
@@ -687,7 +690,7 @@ export const TOOLS = {
   // ----- hierarchy, buses, documentation -----
   add_sheet_symbol: tool({
     description:
-      "Instantiate a child sheet inside a parent sheet (hierarchical design). The symbol's pins are the hierarchical labels on the child sheet (create them with attach_net scope 'hierarchical'). Wire its pins with connect using REF.LABELNAME. Each child sheet should be instantiated once.",
+      "Instantiate a child sheet inside a parent sheet (hierarchical design). The symbol's pins are the hierarchical labels on the child sheet (create them with attach_net scope 'hierarchical'). Wire its pins with connect using REF.LABELNAME. Each child sheet should be instantiated once; to use a circuit several times, use repeat_sheet.",
     schema: z.object({ child_sheet: z.string(), parent_sheet: z.string().optional(), x: z.number().optional(), y: z.number().optional() }),
     run: (doc, { child_sheet, parent_sheet, x, y }) => {
       const child = sheetId(doc, child_sheet)!;
@@ -699,6 +702,42 @@ export const TOOLS = {
       return { ref: c.ref, pins: getPart(sheetPartId(child))!.symbol.pins.map((p) => p.id) };
     },
     label: ({ child_sheet }) => `Sheet symbol for ${child_sheet}`,
+  }),
+  repeat_sheet: tool({
+    description:
+      "Repeat a sheet as channels: adds `count` synced copies (CH2, CH3, ...) whose parts are named REF_CHn (R1 -> R1_CH2). The original sheet is the template: every later edit to it reaches the copies automatically, and copies cannot be edited themselves. Hierarchical labels on the template become per-channel pins: if the template has a sheet symbol, each channel gets one below it; wire each channel's pins separately (e.g. connect #S2.IN to IN2). Then lay out the template on the PCB and call replicate_channel_layout.",
+    schema: z.object({ sheet: z.string().describe("template sheet name or id (not the root sheet)"), count: z.number().int().min(1).max(64).describe("copies to add besides the template") }),
+    run: (doc, { sheet, count }) => {
+      const id = sheetId(doc, sheet);
+      if (!id) throw new Error(`No sheet "${sheet}"`);
+      const added = addChannels(doc, id, count);
+      const design = getDesign(doc);
+      const syms = design.components.filter((c) => added.some((s) => c.partId === sheetPartId(s.id)));
+      return { channels: added.map((s) => ({ sheet: s.name, channel: s.channel, sheet_symbol: syms.find((c) => c.partId === sheetPartId(s.id))?.ref })) };
+    },
+    label: ({ sheet, count }) => `Repeat ${sheet} ×${count + 1}`,
+  }),
+  replicate_channel_layout: tool({
+    description:
+      "Copy the PCB placement and routing of a repeated sheet's template parts to each of its channels. Each channel keeps the offset of the first of its parts you moved away from the template part (move one part per channel first with update_component), or use spacing to step channels apart (channel n at n x spacing from the template). Copper of nets local to the channel is copied; earlier copies are replaced.",
+    schema: z.object({ sheet: z.string().describe("template sheet"), spacing_x: z.number().optional(), spacing_y: z.number().optional() }),
+    run: (doc, { sheet, spacing_x, spacing_y }) => {
+      const id = sheetId(doc, sheet);
+      if (!id) throw new Error(`No sheet "${sheet}"`);
+      return replicateLayout(doc, id, spacing_x !== undefined || spacing_y !== undefined ? { spacing: { x: spacing_x ?? 0, y: spacing_y ?? 0 } } : {});
+    },
+    label: ({ sheet }) => `Replicate ${sheet} layout`,
+  }),
+  detach_channel: tool({
+    description: "Turn a channel sheet into an ordinary sheet whose parts can be edited on their own. It stops following its template.",
+    schema: z.object({ sheet: z.string() }),
+    run: (doc, { sheet }) => {
+      const id = sheetId(doc, sheet);
+      if (!id || !getDesign(doc).sheets.find((s) => s.id === id)?.repeatOf) throw new Error(`"${sheet}" is not a channel sheet`);
+      detachChannel(doc, id);
+      return "detached";
+    },
+    label: ({ sheet }) => `Detach ${sheet}`,
   }),
   add_bus: tool({
     description: "Draw a bus on a sheet, e.g. name 'D[0..7]' or '{SDA SCL}'. Buses are graphical; members connect through labels with the member names (attach_net).",

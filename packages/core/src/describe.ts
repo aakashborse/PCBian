@@ -12,7 +12,7 @@ export function describeDesign(design: Design): string {
   const b = design.board;
   const lines: string[] = [];
   lines.push(`Project "${design.name}". Board ${b.width}x${b.height}mm, ${b.layers} copper layers, ${b.thickness}mm thick, clearance ${b.clearance}mm, default trace ${b.defaultTraceWidth}mm.`);
-  lines.push(`Sheets: ${design.sheets.map((s) => `${s.id} "${s.name}"`).join(", ")}`);
+  lines.push(`Sheets: ${design.sheets.map((s) => `${s.id} "${s.name}"${s.repeatOf ? ` (channel ${s.channel ?? ""} of ${s.repeatOf}, synced copy: edit the template)` : ""}`).join(", ")}`);
   if (design.netClasses.length) lines.push(`Net classes: ${design.netClasses.map((c) => `${c.name} (trace ${c.traceWidth}mm, clearance ${c.clearance}mm, via ${c.viaDiameter}/${c.viaDrill}mm): ${c.nets.join(", ") || "no nets"}`).join("; ")}`);
   lines.push("", "Components (ref | part id | value | sheet | schematic x,y,rot | pcb x,y,rot,side):");
   const sorted = [...design.components].sort((a, b) => a.ref.localeCompare(b.ref, undefined, { numeric: true }));

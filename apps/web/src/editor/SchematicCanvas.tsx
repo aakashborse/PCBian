@@ -31,6 +31,8 @@ import {
   type Terminal,
   type Vec,
   type Wire,
+  addChannels,
+  detachChannel,
 } from "@pcbian/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useEditor } from "./context";
@@ -108,6 +110,12 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
     if (v && sheetOf(design, v) !== sheet) setSheet(sheetOf(design, v));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selection]);
+  /** A channel sheet is a synced copy of its template: view it, but edit the template. */
+  const channel = design.sheets.find((s) => s.id === sheet && s.repeatOf);
+  const locked = () => {
+    if (channel) ed.toast(`This is channel ${channel.channel ?? channel.name}: edit its template sheet instead`);
+    return !!channel;
+  };
   // One entry per symbol unit on this sheet (multi-unit parts can spread over sheets).
   const onSheet = useMemo(() => design.components.flatMap(schematicViews).filter((c) => sheetOf(design, c) === sheet), [design, sheet]);
   const onSheetPins = useMemo(() => new Set(onSheet.flatMap((c) => schematicPins(c).map((p) => termKey({ comp: c.id, pin: p.id })))), [onSheet]);
@@ -177,6 +185,12 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement).closest("input, textarea, select")) return;
+      const k = e.key.toLowerCase();
+      const mod = e.metaKey || e.ctrlKey;
+      if (channel && ((!mod && ["delete", "backspace", "r", "m", "q"].includes(k)) || (mod && k === "d"))) {
+        locked();
+        return;
+      }
       if (e.key.toLowerCase() === "q" && !e.metaKey && !e.ctrlKey) setNcTool((v) => !v);
       if (e.key === "Enter" && busDraft) finishBus();
       if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey && selection?.kind === "component") {
@@ -241,6 +255,13 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
   };
 
   const onBackgroundDown = (e: React.PointerEvent) => {
+    if (e.button === 0 && (drawTool || placing || wiring) && channel) {
+      locked();
+      setDrawTool(null);
+      setPlacing(null);
+      setWiring(null);
+      return;
+    }
     if (e.button === 0 && drawTool) {
       const p = toGrid(vp.toWorld(e.clientX, e.clientY));
       if (drawTool === "text") {
@@ -284,6 +305,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
 
   const onPinDown = (e: React.PointerEvent, t: Terminal) => {
     if (e.button !== 0 || placing) return;
+    if (channel) return;
     e.stopPropagation();
     if (ncTool) {
       toggleNoConnect(doc, t.comp, t.pin);
@@ -305,6 +327,7 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
     if (e.button !== 0 || placing || wiring) return;
     e.stopPropagation();
     select({ kind: "component", id: c.id, ...(c.unit && c.unit > 1 ? { unit: c.unit } : {}) });
+    if (channel) return;
     undo.stopCapturing();
     drag.current = { id: c.id, unit: c.unit, start: vp.toWorld(e.clientX, e.clientY), orig: { x: c.sch.x, y: c.sch.y }, moved: false };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
@@ -578,6 +601,22 @@ export function SchematicCanvas({ presence }: { presence: PresenceState[] }) {
         </button>
       </div>
       <SheetTabs sheet={sheet} setSheet={setSheet} />
+      {channel && (
+        <div className="channel-banner">
+          <span>
+            Channel <b>{channel.channel ?? channel.name}</b> of “{design.sheets.find((s) => s.id === channel.repeatOf)?.name}” · a synced copy, edits go on the template
+          </span>
+          <button className="small" onClick={() => setSheet(channel.repeatOf!)}>
+            Open template
+          </button>
+          <button
+            className="small"
+            onClick={() => confirm(`Detach ${channel.channel ?? channel.name}? It becomes an ordinary sheet and stops following the template.`) && detachChannel(doc, channel.id)}
+          >
+            Detach
+          </button>
+        </div>
+      )}
       <div className="hint" style={{ bottom: 44 }}>
         {drawTool === "bus"
           ? "Click to add bus corners · double-click / Enter to name it · Esc to cancel"
@@ -620,13 +659,13 @@ function SheetTabs({ sheet, setSheet }: { sheet: string; setSheet: (id: string) 
       {design.sheets.map((s) => (
         <button
           key={s.id}
-          className={s.id === sheet ? "on" : ""}
+          className={`${s.id === sheet ? "on" : ""}${s.repeatOf ? " channel" : ""}`}
           onClick={() => setSheet(s.id)}
           onDoubleClick={() => {
             const name = prompt("Rename sheet", s.name);
             if (name?.trim()) renameSheet(conn.doc, s.id, name.trim());
           }}
-          title="Double-click to rename"
+          title={s.repeatOf ? `Channel ${s.channel ?? ""} of ${design.sheets.find((t) => t.id === s.repeatOf)?.name ?? "?"} · double-click to rename` : "Double-click to rename"}
         >
           {s.name}
           <span className="muted small"> {design.components.filter((c) => sheetOf(design, c) === s.id && getPart(c.partId)?.kind === "part").length}</span>
@@ -646,6 +685,25 @@ function SheetTabs({ sheet, setSheet }: { sheet: string; setSheet: (id: string) 
               }}
             >
               ×
+            </span>
+          )}
+          {s.id === sheet && s.id !== design.sheets[0].id && !s.repeatOf && (
+            <span
+              className="x"
+              title="Repeat this sheet as channels (edits to it reach every copy)"
+              onClick={(e) => {
+                e.stopPropagation();
+                const n = Number(prompt(`How many more copies of "${s.name}"?`, "3"));
+                if (!Number.isInteger(n) || n < 1) return;
+                try {
+                  const added = addChannels(conn.doc, s.id, n);
+                  toast(`Added channels ${added.map((x) => x.channel).join(", ")}`);
+                } catch (err) {
+                  toast((err as Error).message);
+                }
+              }}
+            >
+              ⧉
             </span>
           )}
         </button>

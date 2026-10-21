@@ -146,6 +146,8 @@ export interface ComponentData {
   units?: UnitPlacement[];
   /** Set on schematic views of a single unit (see schematicViews): which unit this is. */
   unit?: number;
+  /** On a channel copy: id of the template component this one repeats. */
+  src?: string;
 }
 
 export type SpiceModelType = "D" | "NPN" | "PNP" | "NMOS" | "PMOS";
@@ -160,6 +162,10 @@ export interface SpiceModel {
 export interface Sheet {
   id: string;
   name: string;
+  /** Set on a channel copy: the template sheet it repeats (kept in sync by syncChannels). */
+  repeatOf?: string;
+  /** Channel designator ("CH2"), appended to the reference designators of the copied parts. */
+  channel?: string;
 }
 
 /** Schematic graphics: free text, lines, rectangles and buses (a bus is a named, thick polyline). */
@@ -170,6 +176,8 @@ export interface SchGraphic {
   points: Vec[];
   text?: string;
   size?: number;
+  /** On a channel copy: id of the template graphic. */
+  src?: string;
 }
 
 /** PCB graphics: dimensions and free text on the fab/assembly drawing. */
@@ -278,6 +286,8 @@ export interface Wire {
   b: Terminal;
   /** Intermediate waypoints between terminal a and terminal b. */
   points: Vec[];
+  /** On a channel copy: id of the template wire. */
+  src?: string;
 }
 
 export interface Trace {
@@ -287,6 +297,8 @@ export interface Trace {
   points: Vec[];
   /** Net recorded by an importer; used only when the copper itself reaches no pad. */
   net?: string;
+  /** Copied by replicateLayout from this template trace. */
+  src?: string;
 }
 
 export interface Via {
@@ -300,6 +312,8 @@ export interface Via {
   to?: CopperLayer;
   /** Net recorded by an importer (e.g. stitching vias); used only when the copper itself reaches no pad. */
   net?: string;
+  /** Copied by replicateLayout from this template via. */
+  src?: string;
 }
 
 /** Dielectric between two adjacent copper layers. */

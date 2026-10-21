@@ -102,10 +102,27 @@ export function importAltiumProject(doc: Y.Doc, input: { schematics?: AltiumSchF
 
 function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
   const { doc, report, warnings, pcbByRef, makePart, uidPart, pcbPlacement } = ctx;
-  const sheets = files.map((f) => ({ name: f.name, recs: schDocRecords(f.data) }));
+  const parsed = files.map((f) => ({ name: f.name, recs: schDocRecords(f.data) }));
+  // A file used by several sheet symbols is a repeated channel: it is imported once per symbol, its
+  // parts named REF_<symbol designator> (Altium's default $Component_$RoomName).
+  const symbolsOf = new Map<string, string[]>();
+  const fileName = new Map(parsed.map((s) => [s.name.toLowerCase(), s.name]));
+  for (const s of parsed)
+    s.recs.forEach((r, i) => {
+      if (r.RECORD !== "15") return;
+      const file = (s.recs.find((x) => x.RECORD === "33" && Number(x.OWNERINDEX) === i)?.TEXT ?? "").toLowerCase();
+      const des = s.recs.find((x) => x.RECORD === "32" && Number(x.OWNERINDEX) === i)?.TEXT ?? `S${i}`;
+      if (!symbolsOf.has(file)) symbolsOf.set(file, []);
+      symbolsOf.get(file)!.push(des);
+    });
+  const repeated = (file: string) => (symbolsOf.get(file.toLowerCase())?.length ?? 0) > 1;
+  const sheets: { name: string; recs: Rec[]; channel?: string; portKey: string }[] = parsed.flatMap((s) =>
+    repeated(s.name) ? symbolsOf.get(s.name.toLowerCase())!.map((ch) => ({ ...s, channel: ch, portKey: `${s.name.toLowerCase()}#${ch}` })) : [{ ...s, portKey: s.name.toLowerCase() }],
+  );
+  for (const [file, des] of symbolsOf) if (des.length > 1) warnings.push(`${fileName.get(file) ?? file} is a repeated sheet (${des.join(", ")}): each channel was imported as its own sheet, with parts named REF_${des[0]} and so on`);
   report.sheets = sheets.length;
   const first = getDesign(doc).sheets[0].id;
-  const sheetIds = sheets.map((s, i) => (i === 0 ? first : addSheet(doc, s.name.replace(/\.SchDoc$/i, "")).id));
+  const sheetIds = sheets.map((s, i) => (i === 0 ? first : addSheet(doc, s.name.replace(/\.SchDoc$/i, "") + (s.channel ? ` ${s.channel}` : "")).id));
   const hierarchical = sheets.some((s) => s.recs.some((r) => r.RECORD === "15"));
   if (hierarchical) warnings.push("Sheet symbols were flattened: each schematic file became one sheet, and ports join their sheet entries by name");
 
@@ -114,8 +131,9 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
   sheets.forEach((s, si) =>
     s.recs.forEach((rec, index) => {
       if (rec.RECORD !== "1") return;
-      const ref = s.recs.find((r) => r.RECORD === "34" && Number(r.OWNERINDEX) === index)?.TEXT ?? "";
-      if (!ref) return;
+      const des = s.recs.find((r) => r.RECORD === "34" && Number(r.OWNERINDEX) === index)?.TEXT ?? "";
+      if (!des) return;
+      const ref = s.channel ? `${des}_${s.channel}` : des;
       if (!byRef.has(ref)) byRef.set(ref, []);
       byRef.get(ref)!.push({ sheet: si, rec, index, ref });
     }),
@@ -268,7 +286,7 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
       for (const o of spots) if (Math.hypot(o.p.x - p.x, o.p.y - p.y) < 0.01) UF.union(o.key, key);
       spots.push({ p, key });
     };
-    const fileKey = s.name.toLowerCase();
+    const fileKey = s.portKey;
     for (const r of s.recs) {
       const at = () => P(u(r, "LOCATION.X"), u(r, "LOCATION.Y"));
       if (r.RECORD === "17" && r.TEXT) attach(at(), `power:${r.TEXT}`);
@@ -284,13 +302,14 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
         const owner = s.recs[Number(r.OWNERINDEX)];
         if (!owner || owner.RECORD !== "15") continue;
         const file = s.recs.find((x) => x.RECORD === "33" && Number(x.OWNERINDEX) === Number(r.OWNERINDEX))?.TEXT ?? "";
+        const des = s.recs.find((x) => x.RECORD === "32" && Number(x.OWNERINDEX) === Number(r.OWNERINDEX))?.TEXT ?? "";
         const tl = P(u(owner, "LOCATION.X"), u(owner, "LOCATION.Y"));
         const sx = u(owner, "XSIZE");
         const sy = u(owner, "YSIZE");
         const d = Number(r.DISTANCEFROMTOP ?? 0) * 10 + Number(r.DISTANCEFROMTOP_FRAC1 ?? 0) / 100000;
         const side = Number(r.SIDE ?? 0);
         const p = side === 0 ? { x: tl.x, y: tl.y + d } : side === 1 ? { x: tl.x + sx, y: tl.y + d } : side === 2 ? { x: tl.x + d, y: tl.y } : { x: tl.x + d, y: tl.y + sy };
-        attach(p, `port:${file.toLowerCase()}:${r.NAME}`);
+        attach(p, `port:${file.toLowerCase()}${repeated(file) ? `#${des}` : ""}:${r.NAME}`);
       }
     }
   });
@@ -299,9 +318,18 @@ function importAltiumSchematics(ctx: ImportCtx, files: AltiumSchFile[]) {
   const named = new Map<string, string>();
   const rank = (k: string) => (k.startsWith("power:") ? 0 : k.startsWith("label:") ? 1 : 2);
   const keys = [...UF.keys()].filter((k) => /^(power|label|port):/.test(k)).sort((a, b) => rank(a) - rank(b));
+  // Distinct nets keep distinct names: a channel's port net takes the channel suffix (Input_CH2).
+  const owner = new Map<string, string>();
   for (const k of keys) {
     const root = UF.find(k);
-    if (!named.has(root)) named.set(root, k.replace(/^(power|label):(\d+:)?/, "").replace(/^port:[^:]*:/, ""));
+    if (named.has(root)) continue;
+    let name = k.replace(/^(power|label):(\d+:)?/, "").replace(/^port:[^:]*:/, "");
+    const ch = k.match(/^port:[^:#]*#([^:]*):/)?.[1];
+    if (ch) name = `${name}_${ch}`;
+    const base = name;
+    for (let n = 2; owner.has(name) && owner.get(name) !== root; n++) name = `${base}_${n}`;
+    owner.set(name, root);
+    named.set(root, name);
   }
   const netSheets = new Map<string, Map<number, Terminal[]>>();
   for (const [node, t] of terminalOf) {

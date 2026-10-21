@@ -869,3 +869,35 @@ textarea.mono {
   font-size: 12px;
   white-space: normal;
 }
+
+fieldset.plain {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+fieldset.plain:disabled {
+  opacity: 0.6;
+}
+.channel-card {
+  border-left: 3px solid var(--accent, #6b8afd);
+}
+.sheet-tabs button.channel {
+  font-style: italic;
+}
+.channel-banner {
+  position: absolute;
+  bottom: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--border, #ddd);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  font-size: 12px;
+  z-index: 5;
+}

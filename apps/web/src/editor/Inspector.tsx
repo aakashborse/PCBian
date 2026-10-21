@@ -1,4 +1,7 @@
 import {
+  channelsOf,
+  replicateLayout,
+  type ComponentData,
   deleteComponent,
   deleteTrace,
   deleteVia,
@@ -84,6 +87,56 @@ function TextField({ label, value, onChange }: { label: string; value: string; o
   );
 }
 
+/** Channel status of a part: a copy (with a link to its template) or a template with channels. */
+function ChannelCard({ c }: { c: ComponentData }) {
+  const { design, conn, select, toast, mode } = useEditor();
+  const sheet = design.sheets.find((s) => s.id === sheetOf(design, c));
+  const tplSheet = c.src ? design.sheets.find((s) => s.id === sheet?.repeatOf) : sheet;
+  const chans = tplSheet ? channelsOf(design, tplSheet.id) : [];
+  if (!tplSheet || !chans.length) return null;
+  const tpl = c.src ? design.components.find((x) => x.id === c.src) : undefined;
+  const replicate = () => {
+    try {
+      const r = replicateLayout(conn.doc, tplSheet.id);
+      toast(`Layout copied to ${r.channels} channel${r.channels > 1 ? "s" : ""}: ${r.parts} parts, ${r.traces} traces, ${r.vias} vias`);
+    } catch (e) {
+      toast((e as Error).message);
+    }
+  };
+  return (
+    <div className="card channel-card">
+      {c.src ? (
+        <>
+          <b className="small">Channel {sheet?.channel ?? sheet?.name}</b> <span className="muted small">copy of {tpl?.ref ?? "a template part"} on “{tplSheet.name}”. Schematic edits go on the template; the PCB placement is this channel's own.</span>
+          <div className="row" style={{ gap: 4, marginTop: 6 }}>
+            {tpl && (
+              <button className="small" onClick={() => select({ kind: "component", id: tpl.id })}>
+                Select template
+              </button>
+            )}
+            {mode === "pcb" && (
+              <button className="small" onClick={replicate} title="Place and route every channel like the template, keeping the position of the part you moved">
+                Replicate layout
+              </button>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <b className="small">Template</b> <span className="muted small">repeated as {chans.map((s) => s.channel ?? s.name).join(", ")}. Edits here reach every channel.</span>
+          {mode === "pcb" && (
+            <div className="row" style={{ marginTop: 6 }}>
+              <button className="small" onClick={replicate} title="Place and route every channel like the template. Move one part of a channel first to choose where it goes.">
+                Replicate layout to {chans.length} channel{chans.length > 1 ? "s" : ""}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function Inspector() {
   const { design, selection, select, conn, nets, mode } = useEditor();
   const doc = conn.doc;
@@ -114,6 +167,8 @@ export function Inspector() {
             )}
           </div>
         </div>
+        <ChannelCard c={c} />
+        <fieldset disabled={!!c.src} className="plain">
         {part.kind === "part" && <TextField label="Reference" value={c.ref} onChange={(ref) => updateComponent(doc, c.id, { ref })} />}
         {part.kind === "part" && part.footprint && <TextField label="Manufacturer part number" value={c.mpn ?? part.mpn ?? ""} onChange={(mpn) => updateComponent(doc, c.id, { mpn: mpn.trim() && mpn.trim() !== part.mpn ? mpn.trim() : undefined })} />}
         {variant && part.kind === "part" ? (
@@ -184,7 +239,7 @@ export function Inspector() {
             </div>
           </div>
         )}
-        {mode === "schematic" ? (
+        {mode === "schematic" && (
           <div className="field">
             <label>Rotation</label>
             <button onClick={() => updateComponent(doc, c.id, { sch: { ...c.sch, rot: nextRotation(c.sch.rot) } })}>{c.sch.rot}° ↻</button>
@@ -193,7 +248,9 @@ export function Inspector() {
               <input type="checkbox" checked={Boolean(c.sch.mirror)} onChange={(e) => updateComponent(doc, c.id, { sch: { ...c.sch, mirror: e.target.checked } })} /> left-right
             </label>
           </div>
-        ) : (
+        )}
+        </fieldset>
+        {mode !== "schematic" && (
           part.footprint && (
             <>
               <NumField label="X (mm)" value={c.pcb.x} onChange={(x) => updateComponent(doc, c.id, { pcb: { ...c.pcb, x } })} min={-1000} />
@@ -236,6 +293,7 @@ export function Inspector() {
           {part.kind === "part" && <button onClick={() => setEditing(c.id)}>Edit part…</button>}
           <button
             className="danger"
+            disabled={!!c.src}
             onClick={() => {
               deleteComponent(doc, c.id);
               select(null);

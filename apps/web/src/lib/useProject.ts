@@ -1,4 +1,4 @@
-import { getDesign, type Design } from "@pcbian/core";
+import { getDesign, syncChannels, type Design } from "@pcbian/core";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
@@ -16,6 +16,7 @@ export function useProjectConnection(id: string): { conn: ProjectConnection; syn
     trackVersions(doc);
     const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/yjs`;
     const provider = new WebsocketProvider(url, id, doc);
+    keepChannelsInSync(doc);
     const undo = new Y.UndoManager(["components", "wires", "traces", "vias", "zones", "parts", "keepouts", "schGraphics", "pcbGraphics", "meta", "comments"].map((k) => doc.getMap(k)), { captureTimeout: 400 });
     return { doc, provider, undo };
   }, [id]);
@@ -39,6 +40,23 @@ export function useProjectConnection(id: string): { conn: ProjectConnection; syn
     };
   }, [conn]);
   return { conn, synced, online };
+}
+
+/**
+ * After each local edit (including undo/redo), bring repeated-channel sheets in line with their
+ * templates. Remote edits are synced by the client that made them. The sync itself is not undoable
+ * on its own: undoing the template edit re-syncs the channels.
+ */
+function keepChannelsInSync(doc: Y.Doc) {
+  let queued = false;
+  doc.on("afterTransaction", (tr: Y.Transaction) => {
+    if (!tr.local || tr.origin === "channels" || queued) return;
+    queued = true;
+    queueMicrotask(() => {
+      queued = false;
+      doc.transact(() => syncChannels(doc), "channels");
+    });
+  });
 }
 
 const versions = new WeakMap<Y.Doc, number>();

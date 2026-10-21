@@ -174,4 +174,30 @@ describe("Altium schematic import", () => {
     expect(net(r2, "2")).toBe("GND");
     expect(report.warnings.join(" ")).toMatch(/no footprint/);
   });
+
+  it("imports a sheet used by several sheet symbols once per channel", () => {
+    const sym = (des: string, y: number, index: number) => [
+      { RECORD: "15", "LOCATION.X": "300", "LOCATION.Y": String(y), XSIZE: "50", YSIZE: "40" },
+      { RECORD: "16", OWNERINDEX: String(index), NAME: "IN", DISTANCEFROMTOP: "1", SIDE: "0" },
+      { RECORD: "32", OWNERINDEX: String(index), TEXT: des },
+      { RECORD: "33", OWNERINDEX: String(index), TEXT: "chan.SchDoc" },
+    ];
+    // Root: R1.2 and R2.2 touch the IN entries of channels A and B.
+    const root = schdoc([...resistor("R1", 280, 490, 0), ...resistor("R2", 280, 290, 6), ...sym("A", 500, 12), ...sym("B", 300, 16)]);
+    const chan = schdoc([{ RECORD: "18", NAME: "IN", "LOCATION.X": "100", "LOCATION.Y": "100", WIDTH: "30" }, ...resistor("R1", 150, 100, 1), { RECORD: "17", TEXT: "GND", "LOCATION.X": "170", "LOCATION.Y": "100" }]);
+    const doc = new Y.Doc();
+    initDoc(doc, "rep");
+    const report = importAltiumProject(doc, { schematics: [{ name: "top.SchDoc", data: root }, { name: "chan.SchDoc", data: chan }] });
+    const d = getDesign(doc);
+    expect(d.sheets.map((s) => s.name)).toEqual(["Sheet 1", "chan A", "chan B"]);
+    expect(report.warnings.join(" ")).toMatch(/chan\.SchDoc is a repeated sheet \(A, B\)/);
+    const of = netByTerminal(computeNets(d));
+    const net = (ref: string, pin: string) => of.get(termKey({ comp: findByRef(doc, ref)!.id, pin }));
+    expect(net("R1_A", "1")).toBe("IN_A");
+    expect(net("R1", "2")).toBe("IN_A");
+    expect(net("R1_B", "1")).toBe("IN_B");
+    expect(net("R2", "2")).toBe("IN_B");
+    expect(net("R1_A", "2")).toBe("GND");
+    expect(net("R1_B", "2")).toBe("GND");
+  });
 });
