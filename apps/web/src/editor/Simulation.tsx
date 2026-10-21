@@ -231,8 +231,14 @@ function SweepView() {
   const { design, toast } = useEditor();
   const refs = design.components.filter((c) => SWEEPABLE.test(c.partId) && !c.dnp).map((c) => c.ref);
   const [ref, setRef] = useState(refs[0] ?? "");
-  const [from, setFrom] = useState("0");
-  const [to, setTo] = useState("5");
+  // Sources sweep 0..5 V by default; resistors a decade either side of their value.
+  const range = (r: string): [string, string] => {
+    const c = design.components.find((x) => x.ref === r);
+    const v = c && !c.partId.startsWith("sim_") ? parseValue(c.value) : null;
+    return v ? [si(v / 10), si(v * 10)] : ["0", "5"];
+  };
+  const [from, setFrom] = useState(() => range(refs[0] ?? "")[0]);
+  const [to, setTo] = useState(() => range(refs[0] ?? "")[1]);
   const [points, setPoints] = useState(41);
   const [res, setRes] = useState<SweepResult | null>(null);
   const [probes, setProbes] = useState<string[]>([]);
@@ -256,7 +262,15 @@ function SweepView() {
         <div className="card small">Add a simulation source or a resistor to sweep.</div>
       ) : (
         <div className="row" style={{ marginBottom: 10, flexWrap: "wrap" }}>
-          <select value={ref} onChange={(e) => setRef(e.target.value)}>
+          <select
+            value={ref}
+            onChange={(e) => {
+              setRef(e.target.value);
+              const [a, b] = range(e.target.value);
+              setFrom(a);
+              setTo(b);
+            }}
+          >
             {refs.map((r) => (
               <option key={r}>{r}</option>
             ))}

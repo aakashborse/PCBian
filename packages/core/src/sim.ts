@@ -833,6 +833,7 @@ export function sweepDC(design: Design, opts: { ref: string; from: number; to: n
   const out: SweepResult = { ok: true, param: opts.ref, x: [], nodes: {}, currents: {}, warnings: [] };
   if (!c) return { ...out, ok: false, error: `No component ${opts.ref}` };
   const n = Math.max(2, Math.min(500, opts.points ?? 41));
+  const seen = new Map<string, [string, number]>();
   for (let k = 0; k < n; k++) {
     const v = opts.from + ((opts.to - opts.from) * k) / (n - 1);
     const r = simulateDC(withValue(design, opts.ref, sweptValue(c.value, c.partId, v)));
@@ -840,8 +841,10 @@ export function sweepDC(design: Design, opts: { ref: string; from: number; to: n
     out.x.push(v);
     for (const nd of r.nodes) (out.nodes[nd.net] ??= new Array(k).fill(NaN)).push(nd.voltage);
     for (const e of r.elements) (out.currents[e.ref] ??= new Array(k).fill(NaN)).push(e.current);
-    for (const w of r.warnings) if (!out.warnings.includes(w)) out.warnings.push(w);
+    for (const w of r.warnings) seen.set(w.replace(/[-\d.]+/g, "#"), [seen.get(w.replace(/[-\d.]+/g, "#"))?.[0] ?? w, (seen.get(w.replace(/[-\d.]+/g, "#"))?.[1] ?? 0) + 1]);
   }
+  // The same warning at many sweep points (with different numbers) is reported once.
+  out.warnings = [...seen.values()].map(([w, k]) => (k > 1 ? `${w} (at ${k} of ${n} points)` : w));
   return out;
 }
 

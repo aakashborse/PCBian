@@ -394,6 +394,7 @@ export function lengthIssues(design: Design, analysis = analyzeCopper(design)): 
     const b = len.get(p.negative);
     if (a === undefined || b === undefined || unrouted.has(p.positive) || unrouted.has(p.negative)) continue;
     if (Math.abs(a - b) > p.maxSkew + 1e-6) issues.push({ severity: "warning", code: "skew", message: `Pair ${p.name}: ${p.positive} ${a.toFixed(2)}mm vs ${p.negative} ${b.toFixed(2)}mm, skew ${Math.abs(a - b).toFixed(2)}mm > ${p.maxSkew}mm` });
+    if (p.gap < 0.1) issues.push({ severity: "warning", code: "pair_gap", message: `Pair ${p.name}: ${p.gap}mm gap is below the usual 0.1mm fabrication minimum; widen the traces or accept a different impedance` });
     if (p.impedance) {
       const z = diffImpedance(design.board, "top", p.width, p.gap);
       if (Math.abs(z - p.impedance) / p.impedance > 0.1) issues.push({ severity: "warning", code: "impedance", message: `Pair ${p.name}: ${p.width}/${p.gap}mm gives ${z.toFixed(0)}Ω on the outer layers, target ${p.impedance}Ω` });

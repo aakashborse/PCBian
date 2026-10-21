@@ -10,14 +10,14 @@ The full KiCad/Altium comparison, with status and roadmap, is in [docs/FEATURES.
 
 - **Schematic**: parts library with search, hierarchical sheets with sheet symbols, global/local/hierarchical labels, buses, mirror, click-to-wire, power symbols, notes, sheet frame and title block, no-connect flags, annotation, assembly variants, net highlighting.
 - **Parts**: parametric footprints (chip, SOIC, DIP, QFP, SOT, headers, mounting holes, fiducials…), a pin-list part builder, a part editor (pin table with pin types, drag-and-drop footprint pads), and KiCad `.kicad_sym` + `.kicad_mod` import.
-- **PCB**: 2- or 4-layer boards with polygon or rounded outlines and cutouts, interactive routing with 45° snapping and layer switching (automatic vias), copper pours with thermal reliefs and island removal, keepouts, teardrops, measure and dimensions, net classes (width, clearance, via size), footprints on either side.
-- **Auto-place and auto-route**: connectivity-aware placement (connectors on edges, decoupling caps by their IC) and a multi-layer A* router on a clearance distance field. It handles net classes, adapts its grid to fine-pitch parts and narrows wide traces at small pads.
+- **PCB**: 2–32 layer boards with a dielectric stackup and impedance calculator, blind/buried/micro vias, polygon or rounded outlines and cutouts, interactive routing with 45° snapping and layer switching (automatic vias), copper pours (solid or hatched, with priority) with thermal reliefs and island removal, differential pairs, length tuning with meanders, push-and-shove routing, keepouts, teardrops, measure and dimensions, net classes (width, clearance, via size), footprints on either side.
+- **Auto-place and auto-route**: connectivity-aware placement (connectors on edges, decoupling caps by their IC) and a multi-layer A* router that routes differential pairs coupled and can use blind vias on a clearance distance field. It handles net classes, adapts its grid to fine-pitch parts and narrows wide traces at small pads.
 - **Checks**: ERC (pin-type conflicts such as shorted outputs and undriven inputs, unconnected pins, single-pin nets, no-connect misuse, duplicate refs, hierarchy) and DRC (shorts, net-class clearance, unrouted nets, outline and edge clearance, keepouts, courtyards, layers, via drill/annular ring, trace widths, silk over pads, mask slivers, acid traps).
-- **Simulation**: DC operating point, transient and AC analysis with charts (R, C, L, diodes/LEDs, NPN, N-MOSFET, LM358, NE555, AMS1117; DC/PULSE/SIN/AC sources or supplies from rail names), with LED-current, resistor-power and fuse warnings.
+- **Simulation**: DC operating point, transient, AC, DC sweeps and parameter steps with charts (R, C, L, diodes/LEDs, NPN/PNP, N/P-MOSFET, LM358, NE555, AMS1117; imported SPICE .model cards; DC/PULSE/SIN/AC sources or supplies from rail names), with LED-current, resistor-power and fuse warnings.
 - **3D viewer**: three.js shaped board with copper, pours, vias, holes and package-shaped component bodies.
-- **Manufacturing and interop**: Gerber RS-274X for every copper layer (pours as regions), mask, paste and silkscreen with reference text, Excellon drill, BOM, pick-and-place, fab notes, schematic and assembly PDFs, KiCad `.kicad_pcb` and netlist export, and KiCad project import (schematic sheets plus board).
-- **Autonomous AI copilot**: Claude can do everything in the editor through 34 tools. Given a spec, it plans, creates missing parts, draws a hierarchical schematic, simulates (DC, transient, AC), sets up layers and net classes, places, pours, routes and repeats until ERC/DRC are clean, then runs a fabrication-readiness check. Everyone sees it work live, and it can be stopped at any time.
-- **Real-time collaboration**: Yjs CRDT over WebSockets, live cursors, presence, per-user undo/redo.
+- **Manufacturing and interop**: Gerber RS-274X for every copper layer (pours as regions), mask, paste and silkscreen with reference text, Excellon drill, BOM, pick-and-place, fab notes with the stackup, schematic PDF/SVG and assembly PDF, STEP 3D model, IPC-2581, ODB++, KiCad `.kicad_pcb` and netlist export; import of KiCad projects, EAGLE schematics and boards, and Altium `.PcbDoc` boards.
+- **Autonomous AI copilot**: Claude can do everything in the editor through 47 tools. Given a spec, it plans, creates missing parts, draws a hierarchical schematic, simulates (DC, transient, AC), sets up layers and net classes, places, pours, routes and repeats until ERC/DRC are clean, then runs a fabrication-readiness check. Everyone sees it work live, and it can be stopped at any time.
+- **Real-time collaboration**: Yjs CRDT over WebSockets, live cursors, presence, per-user undo/redo, review comments pinned on the design, and version history with diffs, restore and branching.
 
 ## Quick start
 
@@ -53,7 +53,9 @@ Everything except the copilot works without an API key. Projects are stored unde
 
 **PCB**: footprints start to the left of the board; drag them on or press **Auto-place**. Press **X** (Route), click a pad, click to add corners, click the destination pad. **L** cycles the active layer (dropping a via mid-route). **P** (Pour) draws a copper-pour outline, or use **Fill board**; **K** draws a keepout and **M** measures (two clicks leave a dimension). **Outline…** draws a custom board outline or a cutout (double-click or Enter closes a polygon). Layer count, thickness and net classes are in the Inspector when nothing is selected. **Auto-route** routes everything left in the ratsnest.
 
-**3D** shows the assembled board. The **Sim** tab shows the DC operating point live and runs transient and AC analyses with probe charts. **Import KiCad project** on the dashboard takes all `.kicad_sch` sheets and the `.kicad_pcb`.
+Differential pairs, length groups, the stackup and impedance calculator are in the Inspector when nothing is selected; select a trace to see its impedance and tune its net length. Turn on **Shove** in the route tool to push other traces aside. **Comment** pins a review note (mention @copilot to hand it to the AI); the **Review** and **History** tabs list threads and versions.
+
+**3D** shows the assembled board. The **Sim** tab shows the DC operating point live and runs transient and AC analyses with probe charts. **Import a design** on the dashboard takes KiCad (`.kicad_sch` sheets + `.kicad_pcb`), EAGLE (`.sch` + `.brd`) or Altium (`.PcbDoc`) files.
 
 | Key | Schematic | PCB |
 | --- | --- | --- |
@@ -85,17 +87,17 @@ apps/web        React + Vite. Dashboard, SVG schematic and PCB canvases, library
                 inspector, checks and copilot panels, presence.
 ```
 
-The whole design lives in a single Yjs document (`components`, `wires`, `traces`, `vias`, `zones`, `keepouts`, `schGraphics`, `pcbGraphics`, `parts`, `meta`, `chat`). The web client, the server and the copilot all mutate it through the same helpers in `packages/core/src/doc.ts` and `edit.ts`, which is why AI edits and human edits merge and sync the same way.
+The whole design lives in a single Yjs document (`components`, `wires`, `traces`, `vias`, `zones`, `keepouts`, `schGraphics`, `pcbGraphics`, `parts`, `comments`, `meta`, `chat`); version snapshots are stored next to it on the server. The web client, the server and the copilot all mutate it through the same helpers in `packages/core/src/doc.ts` and `edit.ts`, which is why AI edits and human edits merge and sync the same way.
 
 The copilot (`apps/server/src/copilot.ts`) runs a streaming manual tool loop against the Claude Messages API with adaptive thinking and server-side refusal fallbacks. Tool inputs are validated with zod before they touch the document, and the conversation history is persisted per project.
 
 ## Development
 
 ```bash
-npm test          # vitest: netlist and hierarchy, routing, pours/thermals/keepouts, DRC/ERC, DC/transient/AC simulation, KiCad import/export, PDFs, part builder
+npm test          # vitest: netlist and hierarchy, routing (pairs, blind vias, tuning, shove), pours, DRC/ERC, simulation, KiCad/EAGLE/Altium import, PDFs, STEP/IPC-2581/ODB++, history
 npm run typecheck
 ```
 
 ## Current limitations
 
-See [docs/FEATURES.md](docs/FEATURES.md) for the full list and roadmap. The main gaps compared with KiCad/Altium: at most 4 copper layers; no differential pairs, length tuning or push-and-shove; no native repeated sheet channels (KiCad reused sheets import as one sheet per instance); the symbol editor edits pins rather than free-hand graphics; simulation uses built-in models only (no SPICE model import or parameter sweeps); block-shaped 3D models with no STEP export; and no accounts (anyone with a project link can edit it).
+See [docs/FEATURES.md](docs/FEATURES.md) for the full list and roadmap. The main gaps compared with KiCad/Altium: no accounts or permissions (anyone with a project link can edit it); no supplier pricing/stock; Altium schematics (`.SchDoc`) are not imported yet, and Altium boards with copper at non-90° angles are approximated; push-and-shove moves traces only (not vias or pads); impedance uses closed-form IPC-2141 estimates rather than a field solver; ODB++ output follows the published format but has not been checked in a commercial CAM viewer; the symbol editor edits pins rather than free-hand graphics; no native repeated sheet channels or custom rule language; block-shaped 3D bodies.

@@ -11,9 +11,9 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Project management (create, rename, delete, templates) | ✅ | ✅ | ✅ | — | Dashboard with 3 starter templates |
 | Real-time multi-user editing | ❌ | 🟡 (A365) | ✅ | ✅ | Yjs CRDT, live cursors, presence, shared selection |
 | Per-user undo / redo | ✅ | ✅ | ✅ | — | Only undoes your own edits |
-| Comments / review markup on the design | ❌ | ✅ | ⏳ P3 | ⏳ | |
-| Version history, diff, branching | 🟡 (git) | ✅ | ⏳ P3 | ⏳ | Yjs snapshots planned |
-| Accounts, teams, permissions | — | ✅ | ⏳ P3 | — | Today anyone with the link can edit |
+| Comments / review markup on the design | ❌ | ✅ | ✅ | ✅ | Comments pinned on schematic or PCB, threads, resolve; mention @copilot to have the AI act and answer in the thread |
+| Version history, diff, branching | 🟡 (git) | ✅ | ✅ | 🟡 | Named and automatic snapshots (every 10 min of editing and around each copilot run), change summary, restore (undoable), branch to a new project |
+| Accounts, teams, permissions | — | ✅ | ⏳ P4 | — | Deferred by choice; today anyone with the link can edit |
 | Design variants (fitted / not fitted) | ✅ | ✅ | ✅ | ✅ | Named variants with not-fitted parts and value overrides; BOM, 3D, simulation and exports follow the active one |
 | Release / approval workflow | ❌ | ✅ | ⏳ P4 | — | |
 
@@ -27,7 +27,7 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Power symbols / global power nets | ✅ | ✅ | ✅ | ✅ | Rails named +5V, +3V3, VBUS… |
 | Net labels (local/global/hierarchical) | ✅ | ✅ | ✅ | ✅ | KiCad-style scopes and net names (/net, /Sheet/net) |
 | Multi-sheet schematics | ✅ | ✅ | ✅ | ✅ | Sheet tabs; nets join across sheets by name |
-| Hierarchical sheets / sheet symbols / repeated channels | ✅ | ✅ | 🟡 | ✅ | Sheet symbols with pins from hierarchical labels; double-click to open. Reused sheets are imported from KiCad as one sheet per instance; native repeated channels ⏳ P3 |
+| Hierarchical sheets / sheet symbols / repeated channels | ✅ | ✅ | 🟡 | ✅ | Sheet symbols with pins from hierarchical labels; double-click to open. Reused sheets are imported from KiCad as one sheet per instance; native repeated channels ⏳ P4 |
 | Buses and bus entries | ✅ | ✅ | 🟡 | ✅ | Bus wires with D[0..7] / {SDA SCL} names; members connect through labels (no bus-entry graphics) |
 | No-connect flags | ✅ | ✅ | ✅ | ✅ | |
 | Annotation (auto-numbering) | ✅ | ✅ | ✅ | ✅ | |
@@ -35,7 +35,7 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Net highlighting / net navigator | ✅ | ✅ | 🟡 | ✅ | Click a wire to highlight its net |
 | Text, graphics, title block | ✅ | ✅ | ✅ | ✅ | Notes, sheet frame and editable title block |
 | Pin electrical types + full ERC matrix | ✅ | ✅ | ✅ | ✅ | Pin types: shorted outputs, undriven inputs and power, open-collector conflicts; also hierarchy recursion and sheet reuse |
-| Schematic PDF/SVG export | ✅ | ✅ | 🟡 | ✅ | PDF with one page per sheet and title block; SVG ⏳ P3 |
+| Schematic PDF/SVG export | ✅ | ✅ | ✅ | ✅ | PDF (one page per sheet) and SVG per sheet, with title block |
 | Find & replace, cross-probing | ✅ | ✅ | 🟡 | ✅ | Clicking a check issue jumps to the part in either view |
 
 ## 3. Libraries and parts
@@ -49,8 +49,8 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Graphical footprint editor | ✅ | ✅ | ✅ | ✅ | Drag pads on a 0.05mm grid, SMD/THT pads, generate from package, auto silkscreen and courtyard |
 | Import KiCad symbols/footprints (.kicad_sym/.kicad_mod) | ✅ | ✅ | ✅ | — | Matched by pin number; works with SnapEDA/Ultra Librarian KiCad downloads |
 | Import whole KiCad libraries / projects | ✅ | ✅ | ✅ | — | Projects: every .kicad_sch sheet plus the .kicad_pcb (see Interoperability) |
-| Supplier data (stock, price, lifecycle) | 🟡 (plugins) | ✅ | ⏳ P3 | ⏳ | Needs a distributor API (Octopart/DigiKey) |
-| 3D models per footprint (STEP/WRL) | ✅ | ✅ | 🟡 | — | Generated block models; STEP import ⏳ P3 |
+| Supplier data (stock, price, lifecycle) | 🟡 (plugins) | ✅ | ⏳ P4 | ⏳ | Deferred: needs a distributor API key (Octopart/DigiKey) |
+| 3D models per footprint (STEP/WRL) | ✅ | ✅ | 🟡 | — | Generated block models; STEP model import ⏳ P4 |
 
 ## 4. PCB layout
 
@@ -59,21 +59,21 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Board outline (rectangle) | ✅ | ✅ | ✅ | ✅ | |
 | Arbitrary outlines, cutouts, slots | ✅ | ✅ | ✅ | ✅ | Polygon outline, rounded corners, internal cutouts; used by DRC, pours, router, Gerber and 3D |
 | Layer stack: 2 / 4 copper layers | ✅ | ✅ | ✅ | ✅ | |
-| 6–32 layers, stackup manager, impedance | ✅ | ✅ | ⏳ P3 | ⏳ | |
+| 6–32 layers, stackup manager, impedance | ✅ | ✅ | ✅ | ✅ | 2–32 layers; per-layer copper weight and dielectrics; IPC-2141 microstrip/stripline and differential calculator; impedance net classes |
 | Footprint placement, rotate, flip to bottom | ✅ | ✅ | ✅ | ✅ | |
 | Auto-placement | ❌ | 🟡 | ✅ | ✅ | Connectivity-aware: connectors on edges, decoupling caps by their IC, wirelength-driven; shelf packer still available |
 | Ratsnest | ✅ | ✅ | ✅ | — | |
 | Interactive routing, 45° snapping | ✅ | ✅ | ✅ | ✅ | |
-| Push-and-shove routing | ✅ | ✅ | ⏳ P3 | — | |
+| Push-and-shove routing | ✅ | ✅ | 🟡 | ✅ | Shove mode pushes other nets' traces aside with 45° bumps (recursively); pads and vias stay fixed, crossings are refused |
 | Layer switching with automatic vias | ✅ | ✅ | ✅ | ✅ | |
 | Through vias | ✅ | ✅ | ✅ | ✅ | |
-| Blind / buried / micro vias | ✅ | ✅ | ⏳ P3 | ⏳ | |
+| Blind / buried / micro vias | ✅ | ✅ | ✅ | ✅ | Via spans in the editor, router (blind_vias), DRC, per-span drill files, KiCad I/O |
 | Copper pours / zones with clearance | ✅ | ✅ | ✅ | ✅ | Thermal-relief spokes or solid pad connection, configurable gap and spoke width |
-| Island removal, hatched fills, zone priority | ✅ | ✅ | 🟡 | ✅ | Isolated islands removed; hatched fills and zone priority ⏳ P3 |
+| Island removal, hatched fills, zone priority | ✅ | ✅ | ✅ | ✅ | Hatched fills keep solid copper around pads; higher-priority pours cut lower ones |
 | Auto-router | ❌ (Freerouting) | ✅ | ✅ | ✅ | Multi-layer A* on a clearance distance field, net-class aware, fine-pitch aware, neck-down |
 | Net classes (width, clearance, via size) | ✅ | ✅ | ✅ | ✅ | |
-| Differential pairs | ✅ | ✅ | ⏳ P3 | ⏳ | |
-| Length tuning / matching (meanders) | ✅ | ✅ | ⏳ P3 | ⏳ | |
+| Differential pairs | ✅ | ✅ | ✅ | ✅ | Pairs from net names or by hand; coupled auto-routing at the pair gap; gap solved from target Zdiff; skew and gap checks |
+| Length tuning / matching (meanders) | ✅ | ✅ | ✅ | ✅ | Serpentines with clearance checks; length groups and pair skew matching |
 | Teardrops | ✅ | ✅ | ✅ | ✅ | Pads and vias, on in board settings; in Gerbers |
 | Keepout areas | ✅ | ✅ | ✅ | ✅ | Per-layer: no tracks, vias or pours; router, pours and DRC obey them |
 | Silkscreen editing (text, graphics) | ✅ | ✅ | 🟡 | — | Reference designators auto-generated |
@@ -88,7 +88,7 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | DRC: clearance, shorts, unrouted, outline, courtyard | ✅ | ✅ | ✅ | ✅ | Net-class aware |
 | DRC: annular ring, drill size, layer misuse | ✅ | ✅ | ✅ | ✅ | |
 | DRC: silk-to-pad, mask slivers, acid traps | ✅ | ✅ | ✅ | ✅ | Also keepout, edge clearance and parts overhanging the edge |
-| Custom rule language | ✅ | ✅ | ⏳ P3 | ⏳ | |
+| Custom rule language | ✅ | ✅ | ⏳ P4 | ⏳ | |
 | Live DRC while editing | 🟡 | ✅ | ✅ | — | Markers update as you edit |
 
 ## 6. Simulation and analysis
@@ -96,8 +96,8 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Feature | KiCad | Altium | PCBian | AI | Notes |
 | --- | :-: | :-: | :-: | :-: | --- |
 | DC operating point | ✅ (ngspice) | ✅ | ✅ | ✅ | MNA + Newton with source and gain stepping; rails from net names or simulation sources |
-| Transient / AC / sweep analysis | ✅ | ✅ | 🟡 | ✅ | Transient (from power-on, PULSE/SIN sources) and AC (gain/phase, -3dB) with charts and probes; parameter sweeps ⏳ P3 |
-| SPICE model import, transistor/IC models | ✅ | ✅ | 🟡 | ✅ | Built-in models: NPN (Ebers-Moll), N-MOSFET (level 1), LM358, NE555, AMS1117; SPICE model import ⏳ P3 |
+| Transient / AC / sweep analysis | ✅ | ✅ | 🟡 | ✅ | Transient (from power-on, PULSE/SIN sources) and AC (gain/phase, -3dB) with charts and probes; DC sweeps and parameter steps |
+| SPICE model import, transistor/IC models | ✅ | ✅ | 🟡 | ✅ | .model cards for D, NPN, PNP, NMOS, PMOS/VDMOS; built-in LM358, NE555, AMS1117; .subckt not supported |
 | Design checks from simulation (LED current, resistor power, fuse rating) | ❌ | 🟡 | ✅ | ✅ | |
 | Signal / power integrity | ❌ | ✅ (add-on) | ⏳ P4 | ⏳ | |
 | Thermal analysis | ❌ | 🟡 | ⏳ P4 | ⏳ | |
@@ -111,9 +111,9 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | BOM (CSV) | ✅ | ✅ | ✅ | ✅ | DNP excluded |
 | Pick-and-place / centroid | ✅ | ✅ | ✅ | ✅ | |
 | Fabrication notes | 🟡 | ✅ | ✅ | ✅ | |
-| ODB++ / IPC-2581 | ✅ | ✅ | ⏳ P3 | ⏳ | |
+| ODB++ / IPC-2581 | ✅ | ✅ | ✅ | ✅ | IPC-2581 rev C validates against the official schema; ODB++ v8 job (zipped) following KiCad's exporter conventions, not checked in a commercial viewer |
 | Assembly drawings / PDF prints | ✅ | ✅ | ✅ | ✅ | Top and bottom assembly PDF; included in the fabrication zip |
-| STEP / VRML 3D export | ✅ | ✅ | ⏳ P3 | ⏳ | |
+| STEP / VRML 3D export | ✅ | ✅ | ✅ | ✅ | STEP AP214 B-rep of the shaped board (holes, cutouts) and box bodies; validated with OpenCascade |
 | Fab readiness check | ❌ | 🟡 | ✅ | ✅ | |
 
 ## 8. 3D
@@ -132,7 +132,7 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Export KiCad netlist (.net) | ✅ | 🟡 | ✅ | ✅ | |
 | Import KiCad parts | ✅ | ✅ | ✅ | — | |
 | Import KiCad board / schematic | ✅ | ✅ | ✅ | — | KiCad 6–9: hierarchy (incl. reused sheets), labels, multi-unit parts, footprints, tracks, zones, keepouts, outline. On KiCad's complex_hierarchy demo every pad's net matches KiCad's |
-| Altium / Eagle import | 🟡 | ✅ | ⏳ P3 | ⏳ | |
+| Altium / Eagle import | 🟡 | ✅ | 🟡 | — | EAGLE .sch + .brd (exact nets on Adafruit's AHT20 board); Altium .PcbDoc boards (pads, tracks, arcs, vias, pours, regions); Altium schematics not yet |
 
 ## 10. AI copilot (beyond KiCad / Altium)
 
@@ -145,10 +145,14 @@ Legend: ✅ available · 🟡 partial / basic version · ⏳ planned (phase note
 | Placement (auto + targeted), routing (auto, per-net, manual traces, vias) | ✅ |
 | Self-verification loop: ERC, DRC, DC/transient/AC simulation, fabrication readiness | ✅ |
 | Assembly variants | ✅ |
+| Stackup, impedance targets, differential pairs, length matching, HDI vias, push-and-shove | ✅ |
+| Answers review comments in their threads (@copilot), adds its own | ✅ |
+| SPICE model import, DC sweeps and parameter steps | ✅ |
+| Snapshot before/after each run, so its changes can be compared or rolled back | ✅ |
 | Shared live conversation, Stop button | ✅ |
 
 ## Roadmap
 
 - **Phase 2 (done):** hierarchical sheets, buses, local/hierarchical labels, pin-type ERC matrix, graphical symbol/footprint editors, KiCad board/schematic import, thermal reliefs, island removal, keepouts, teardrops, arbitrary board outlines, transient/AC simulation with transistor models, schematic and assembly PDF export, connectivity-aware auto-placement.
-- **Phase 3:** native repeated channels, hatched zones and priority, parameter sweeps and SPICE model import, free-hand symbol drawing, schematic SVG, differential pairs, length tuning, push-and-shove, 6+ layers with stackup/impedance, blind/buried vias, STEP export/import, ODB++/IPC-2581, supplier pricing/stock, version history, comments, accounts.
-- **Phase 4:** signal/power integrity, thermal, panelization, MCAD co-design, release workflows.
+- **Phase 3 (done):** stackup/impedance, 6–32 layers, blind/buried/micro vias, differential pairs, length tuning, push-and-shove, version history, comments, STEP, IPC-2581, ODB++, schematic SVG, EAGLE and Altium board import, hatched pours and priority, SPICE model import, sweeps.
+- **Phase 4:** accounts and permissions, supplier pricing/stock, Altium schematic import, native repeated channels, custom rule language, STEP model import, free-hand symbol drawing, signal/power integrity, thermal, panelization, MCAD co-design, release workflows.
