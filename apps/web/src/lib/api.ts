@@ -26,6 +26,16 @@ async function call<T>(method: string, url: string, body?: unknown): Promise<T> 
   return res.status === 204 ? (undefined as T) : ((await res.json()) as T);
 }
 
+export interface ImportReport {
+  components: number;
+  nets: number;
+  sheets: number;
+  traces: number;
+  vias: number;
+  zones: number;
+  warnings: string[];
+}
+
 export interface VersionMeta {
   id: string;
   name: string;
@@ -43,7 +53,9 @@ export const api = {
   project: (id: string) => call<ProjectMeta>("GET", `/api/projects/${id}`),
   create: (name: string, template: string) => call<ProjectMeta>("POST", "/api/projects", { name, template }),
   importKicad: (name: string, schematics: { name: string; text: string }[], pcb?: string) =>
-    call<ProjectMeta & { report: { components: number; nets: number; sheets: number; traces: number; vias: number; zones: number; warnings: string[] } }>("POST", "/api/projects/import", { name, schematics, pcb }),
+    call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, schematics, pcb }),
+  importEagle: (name: string, eagle: { schematic?: string; board?: string }) => call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, eagle }),
+  importAltium: (name: string, base64: string) => call<ProjectMeta & { report: ImportReport }>("POST", "/api/projects/import", { name, altium: base64 }),
   rename: (id: string, name: string) => call<ProjectMeta>("PATCH", `/api/projects/${id}`, { name }),
   remove: (id: string) => call<void>("DELETE", `/api/projects/${id}`),
   ask: (id: string, message: string, author: string) => call<{ ok: boolean }>("POST", `/api/projects/${id}/copilot`, { message, author }),

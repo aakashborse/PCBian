@@ -190,7 +190,11 @@ export function Editor({ projectId }: { projectId: string }) {
                   [
                     ["Gerber + drill (fabrication .zip)", () => exporters.gerbers(design)],
                     ["Schematic (.pdf)", () => exporters.schematicPdf(design)],
+                    ["Schematic (.svg)", () => exporters.svg(design)],
                     ["Assembly drawing (.pdf)", () => exporters.assemblyPdf(design)],
+                    ["3D model (.step)", () => exporters.step(design)],
+                    ["IPC-2581 (.xml)", () => exporters.ipc2581(design)],
+                    ["ODB++ (.zip)", () => exporters.odb(design)],
                     ["Bill of materials (.csv)", () => exporters.bom(design)],
                     ["Pick and place (.csv)", () => exporters.pnp(design)],
                     ["KiCad board (.kicad_pcb)", () => exporters.kicadPcb(design)],
@@ -255,7 +259,7 @@ export function Editor({ projectId }: { projectId: string }) {
       {importReport && (
         <div className="modal-backdrop" onClick={() => setImportReport(null)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px, calc(100vw - 32px))" }}>
-            <h3>KiCad import</h3>
+            <h3>Import report</h3>
             <p className="small" style={{ margin: 0 }}>
               {importReport.components} components · {importReport.nets} nets · {importReport.sheets || 1} sheet(s) · {importReport.traces} track segments · {importReport.vias} vias · {importReport.zones} pours
             </p>

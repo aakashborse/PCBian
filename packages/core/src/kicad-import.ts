@@ -479,9 +479,9 @@ export function importBoard(doc: Y.Doc, pcb: PcbData | null, warnings: string[],
     // KiCad keeps design rules in the .kicad_pro file; adopt the clearance the board actually uses.
     const used = minClearance(getDesign(doc));
     if (used < getDesign(doc).board.clearance) {
-      const c = Math.max(0.1, Math.floor(used * 100) / 100);
+      const c = Math.max(0.05, Math.floor(used * 1000) / 1000);
       setBoard(doc, { clearance: c, defaultTraceWidth: Math.min(0.25, Math.min(...b.traces.map((t) => t.width), 0.25)) });
-      warnings.push(`Board clearance set to ${c}mm to match the imported layout (KiCad stores rules in the .kicad_pro file)`);
+      warnings.push(`Board clearance set to ${c}mm to match the imported layout (design rules are not part of the imported files)`);
     }
     report.traces = b.traces.length;
     report.vias = b.vias.length;

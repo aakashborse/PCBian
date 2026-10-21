@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  addZone,
+  boardOutlineZone,
+  hatchHoles,
+  ipc2581,
+  odbFiles,
+  parseXml,
+  schematicSvgs,
+  stepFile,
+  xkids,
+  xpath,
+  zoneFill,
   addComment,
   addSpiceModels,
   parseSpiceModels,
@@ -382,5 +393,45 @@ describe("SPICE models and sweeps", () => {
     expect(f3[0]).toBeLessThan(1800);
     expect(f3[1]).toBeGreaterThan(140);
     expect(f3[1]).toBeLessThan(180);
+  });
+});
+
+describe("pour styles and fabrication outputs", () => {
+  it("cuts lower-priority pours around higher-priority ones and hatches", () => {
+    const doc = boardDoc(2);
+    const d0 = getDesign(doc);
+    const big = addZone(doc, { net: "GND", layer: "top", points: boardOutlineZone(d0.board) });
+    const small = addZone(doc, { net: "+5V", layer: "top", points: [{ x: 2, y: 2 }, { x: 8, y: 2 }, { x: 8, y: 8 }, { x: 2, y: 8 }], priority: 1, fill: "hatch", hatchWidth: 0.3, hatchGap: 0.8 });
+    const d = getDesign(doc);
+    const fb = zoneFill(d, d.zones.find((z) => z.id === big.id)!);
+    expect(fb.cutouts.some((c) => c.kind === "polygon" && c.points[0].x === 2)).toBe(true);
+    const fs = zoneFill(d, d.zones.find((z) => z.id === small.id)!);
+    expect(fs.hatch).toMatchObject({ width: 0.3, gap: 0.8 });
+    expect(hatchHoles(fs).length).toBeGreaterThan(9);
+    expect(runDrc(d).filter((i) => i.code === "short")).toEqual([]);
+  });
+
+  it("writes STEP, IPC-2581, ODB++ and schematic SVG", () => {
+    const doc = boardDoc(4);
+    const r = autoRoute(getDesign(doc));
+    for (const t of r.traces) addTrace(doc, t);
+    for (const v of r.vias) addVia(doc, v, v.diameter, v.drill, v);
+    const d = getDesign(doc);
+    const step = stepFile(d);
+    expect(step.startsWith("ISO-10303-21;")).toBe(true);
+    // One solid for the board and one per fitted component with a body.
+    expect(step.match(/MANIFOLD_SOLID_BREP/g)!.length).toBe(1 + d.components.filter((c) => !/MOUNT/.test(c.partId) && c.partId.match(/resistor|led|header/)).length);
+    const ipc = parseXml(ipc2581(d));
+    const root = xpath(ipc, "IPC-2581")!;
+    expect(root.attrs.revision).toBe("C");
+    expect(xkids(xpath(root, "Ecad/CadData")!, "Layer").filter((l) => l.attrs.layerFunction === "SIGNAL")).toHaveLength(4);
+    const odb = odbFiles(d);
+    const job = Object.keys(odb)[0].split("/")[0];
+    for (const f of ["matrix/matrix", "steps/pcb/profile", "steps/pcb/layers/top/features", "steps/pcb/layers/in2/features", "steps/pcb/layers/drill/features", "steps/pcb/eda/data"]) expect(odb[`${job}/${f}`]).toBeDefined();
+    expect(odb[`${job}/steps/pcb/layers/top/features`]).toMatch(/^UNITS=MM/);
+    const svg = schematicSvgs(d);
+    expect(svg).toHaveLength(1);
+    expect(svg[0].svg).toContain("<svg");
+    expect(svg[0].svg).toContain(">R1<");
   });
 });

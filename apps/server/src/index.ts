@@ -2,7 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { importKicadProject, initDoc, setName } from "@pcbian/core";
+import { importAltiumPcb, importEagleProject, importKicadProject, initDoc, setName } from "@pcbian/core";
 import express from "express";
 import { WebSocketServer } from "ws";
 import { copilotEnabled, isBusy, resetCopilot, runCopilot, stopCopilot } from "./copilot.js";
@@ -38,17 +38,23 @@ app.post("/api/projects", (req, res) => {
   res.status(201).json(meta);
 });
 
-// Create a project from KiCad files (.kicad_sch sheets and/or a .kicad_pcb board).
+// Create a project from KiCad (.kicad_sch/.kicad_pcb), EAGLE (.sch/.brd) or Altium (.PcbDoc, base64) files.
 app.post("/api/projects/import", (req, res) => {
   const schematics = Array.isArray(req.body?.schematics) ? (req.body.schematics as { name: string; text: string }[]).filter((f) => typeof f?.text === "string") : [];
   const pcb = typeof req.body?.pcb === "string" ? req.body.pcb : undefined;
-  if (!schematics.length && !pcb) return void res.status(400).json({ error: "Provide at least one .kicad_sch or a .kicad_pcb file" });
-  const name = String(req.body?.name ?? "").trim() || "Imported KiCad project";
+  const eagle = req.body?.eagle as { schematic?: string; board?: string } | undefined;
+  const altium = typeof req.body?.altium === "string" ? req.body.altium : undefined;
+  if (!schematics.length && !pcb && !eagle?.schematic && !eagle?.board && !altium) return void res.status(400).json({ error: "Provide KiCad, EAGLE or Altium design files" });
+  const name = String(req.body?.name ?? "").trim() || "Imported project";
   const meta = createProjectMeta(name);
   const room = getRoom(meta.id);
   try {
     initDoc(room.doc, name);
-    const report = importKicadProject(room.doc, { schematics, pcb });
+    const report = altium
+      ? importAltiumPcb(room.doc, new Uint8Array(Buffer.from(altium, "base64")))
+      : eagle
+        ? importEagleProject(room.doc, { schematic: typeof eagle.schematic === "string" ? eagle.schematic : undefined, board: typeof eagle.board === "string" ? eagle.board : undefined })
+        : importKicadProject(room.doc, { schematics, pcb });
     room.save();
     res.status(201).json({ ...meta, report });
   } catch (e) {

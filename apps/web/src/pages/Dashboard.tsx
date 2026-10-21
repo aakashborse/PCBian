@@ -45,23 +45,36 @@ export function Dashboard() {
         </p>
         <div className="templates">
           <label className="template" style={{ cursor: "pointer", border: "1px dashed #3a4352" }} title="Select .kicad_sch files (all sheets) and/or a .kicad_pcb">
-            <b>⇪ Import KiCad project</b>
-            <span className="muted small">Schematic sheets (.kicad_sch) and/or board (.kicad_pcb), KiCad 6–9.</span>
+            <b>⇪ Import a design</b>
+            <span className="muted small">KiCad (.kicad_sch sheets / .kicad_pcb), EAGLE (.sch / .brd) or Altium (.PcbDoc).</span>
             <input
               type="file"
               multiple
-              accept=".kicad_sch,.kicad_pcb"
+              accept=".kicad_sch,.kicad_pcb,.sch,.brd,.PcbDoc,.pcbdoc"
               style={{ display: "none" }}
               onChange={async (e) => {
                 const files = [...(e.target.files ?? [])];
                 e.target.value = "";
                 if (!files.length) return;
-                const sch = await Promise.all(files.filter((f) => f.name.endsWith(".kicad_sch")).map(async (f) => ({ name: f.name, text: await f.text() })));
-                const pcbFile = files.find((f) => f.name.endsWith(".kicad_pcb"));
-                const name = (pcbFile ?? files[0]).name.replace(/\.kicad_(sch|pcb)$/, "");
+                const ext = (f: File) => f.name.toLowerCase().split(".").pop() ?? "";
+                const name = files[0].name.replace(/\.(kicad_sch|kicad_pcb|sch|brd|pcbdoc)$/i, "");
                 try {
                   setError("Importing…");
-                  const p = await api.importKicad(name, sch, pcbFile ? await pcbFile.text() : undefined);
+                  const altium = files.find((f) => ext(f) === "pcbdoc");
+                  const eagleSch = files.find((f) => ext(f) === "sch");
+                  const eagleBrd = files.find((f) => ext(f) === "brd");
+                  let p;
+                  if (altium) {
+                    const bytes = new Uint8Array(await altium.arrayBuffer());
+                    let bin = "";
+                    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+                    p = await api.importAltium(name, btoa(bin));
+                  } else if (eagleSch || eagleBrd) p = await api.importEagle(name, { schematic: eagleSch ? await eagleSch.text() : undefined, board: eagleBrd ? await eagleBrd.text() : undefined });
+                  else {
+                    const sch = await Promise.all(files.filter((f) => ext(f) === "kicad_sch").map(async (f) => ({ name: f.name, text: await f.text() })));
+                    const pcbFile = files.find((f) => ext(f) === "kicad_pcb");
+                    p = await api.importKicad(name, sch, pcbFile ? await pcbFile.text() : undefined);
+                  }
                   setError("");
                   try {
                     sessionStorage.setItem(`pcbian.import.${p.id}`, JSON.stringify(p.report));

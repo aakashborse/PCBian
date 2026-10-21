@@ -24,3 +24,4 @@ export * from "./fabfeatures";
 export * from "./ipc2581";
 export * from "./xml";
 export * from "./eagle-import";
+export * from "./altium-import";

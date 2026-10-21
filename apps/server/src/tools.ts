@@ -846,7 +846,7 @@ export const TOOLS = {
         drc_errors: drc.filter((i) => i.severity === "error").length,
         unrouted: drc.filter((i) => i.code === "unrouted").map((i) => i.message),
         bom_lines: bomCsv(d).trim().split("\n").length - 1,
-        files: [...Object.keys(gerberFiles(d)), "schematic.pdf", "assembly.pdf", `${d.name}.kicad_pcb`],
+        files: [...Object.keys(gerberFiles(d)), "schematic.pdf", "schematic.svg", "assembly.pdf", `${d.name}.kicad_pcb`, `${d.name}.step`, `${d.name}.ipc2581.xml`, `${d.name}-odb.zip (ODB++)`],
       };
     },
     label: () => "Fabrication readiness check",

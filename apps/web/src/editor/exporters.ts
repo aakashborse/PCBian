@@ -1,4 +1,4 @@
-import { assemblyPdf, bomCsv, gerberFiles, kicadNetlist, kicadPcb, netlistText, pickAndPlaceCsv, schematicPdf, type Design } from "@pcbian/core";
+import { assemblyPdf, bomCsv, gerberFiles, ipc2581, kicadNetlist, kicadPcb, netlistText, odbFiles, pickAndPlaceCsv, schematicPdf, schematicSvgs, stepFile, type Design } from "@pcbian/core";
 import JSZip from "jszip";
 
 function download(name: string, data: Blob) {
@@ -20,6 +20,20 @@ export const exporters = {
   kicadNet: (d: Design) => download(`${safe(d.name)}.net`, new Blob([kicadNetlist(d)], { type: "text/plain" })),
   schematicPdf: (d: Design) => download(`${safe(d.name)}-schematic.pdf`, new Blob([schematicPdf(d) as BlobPart], { type: "application/pdf" })),
   assemblyPdf: (d: Design) => download(`${safe(d.name)}-assembly.pdf`, new Blob([assemblyPdf(d) as BlobPart], { type: "application/pdf" })),
+  step: (d: Design) => download(`${safe(d.name)}.step`, new Blob([stepFile(d)], { type: "model/step" })),
+  ipc2581: (d: Design) => download(`${safe(d.name)}.ipc2581.xml`, new Blob([ipc2581(d)], { type: "application/xml" })),
+  async odb(d: Design) {
+    const zip = new JSZip();
+    for (const [file, body] of Object.entries(odbFiles(d))) zip.file(file, body);
+    download(`${safe(d.name)}-odb.zip`, await zip.generateAsync({ type: "blob" }));
+  },
+  async svg(d: Design) {
+    const sheets = schematicSvgs(d);
+    if (sheets.length === 1) return download(`${safe(d.name)}-schematic.svg`, new Blob([sheets[0].svg], { type: "image/svg+xml" }));
+    const zip = new JSZip();
+    sheets.forEach((s, i) => zip.file(`${safe(d.name)}-${i + 1}-${safe(s.sheet)}.svg`, s.svg));
+    download(`${safe(d.name)}-schematic-svg.zip`, await zip.generateAsync({ type: "blob" }));
+  },
   json: (d: Design) => download(`${safe(d.name)}.pcbian.json`, new Blob([JSON.stringify(d, null, 2)], { type: "application/json" })),
   async gerbers(d: Design) {
     const zip = new JSZip();
