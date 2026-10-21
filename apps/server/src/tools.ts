@@ -1,6 +1,8 @@
 // Copilot tools. Each tool validates its input with zod and edits the shared Yjs
 // document through @pcbian/core, so AI edits behave exactly like human edits.
 import {
+  fieldSolveImpedance,
+  fieldWidthForImpedance,
   addChannels,
   detachChannel,
   replicateLayout,
@@ -702,6 +704,21 @@ export const TOOLS = {
       return { ref: c.ref, pins: getPart(sheetPartId(child))!.symbol.pins.map((p) => p.id) };
     },
     label: ({ child_sheet }) => `Sheet symbol for ${child_sheet}`,
+  }),
+  field_solve_impedance: tool({
+    description:
+      "Field-solve the impedance of a trace (or a differential pair when gap is given) on a copper layer of this board's stackup: a 2D electrostatic solution of the real cross-section (copper thickness, soldermask, each dielectric), accurate to about 1%, unlike the closed-form estimates. Returns Z0 and effective permittivity, plus odd/even/differential/common-mode impedances for pairs. With target, also solves the width giving that impedance (differential when gap is given). Each solve takes up to a second.",
+    schema: z.object({ layer: z.string().default("top"), width: z.number().positive().describe("trace width mm"), gap: z.number().positive().optional().describe("pair edge-to-edge gap mm"), target: z.number().positive().optional().describe("target ohms (Zdiff for a pair)") }),
+    run: (doc, { layer, width, gap, target }) => {
+      const board = getDesign(doc).board;
+      if (!copperLayers(board).includes(layer as CopperLayer)) throw new Error(`No layer ${layer}; layers: ${copperLayers(board).join(", ")}`);
+      const r = fieldSolveImpedance(board, layer as CopperLayer, width, gap);
+      const round = (v?: number) => (v === undefined ? undefined : Math.round(v * 100) / 100);
+      const out: Record<string, unknown> = gap === undefined ? { z0: round(r.z0), eeff: round(r.eeff) } : { zdiff: round(r.zdiff), zodd: round(r.zodd), zeven: round(r.zeven), zcommon: round(r.zcommon), eeff_odd: round(r.eeff) };
+      if (target) out.width_for_target = fieldWidthForImpedance(board, layer as CopperLayer, target, gap, width);
+      return out;
+    },
+    label: ({ layer, width, gap }) => `Field-solve ${width}mm${gap ? `/${gap}mm pair` : ""} on ${layer}`,
   }),
   repeat_sheet: tool({
     description:

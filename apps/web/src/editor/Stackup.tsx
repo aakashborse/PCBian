@@ -1,6 +1,7 @@
-import { copperLayers, defaultStackup, diffImpedance, gapForDiffImpedance, layerLabel, OZ_MM, setBoard, stackupOf, stackupThickness, traceImpedance, widthForImpedance, type CopperLayer, type Stackup } from "@pcbian/core";
+import { copperLayers, defaultStackup, diffImpedance, type FieldSolution, gapForDiffImpedance, layerLabel, OZ_MM, setBoard, stackupOf, stackupThickness, traceImpedance, widthForImpedance, type CopperLayer, type Stackup } from "@pcbian/core";
 import { useState } from "react";
 import { useEditor } from "./context";
+import { solveImpedance, solveWidth } from "../lib/fieldSolver";
 
 /** Layer stackup table (copper weights, dielectrics) and a controlled-impedance calculator. */
 export function StackupCard() {
@@ -107,7 +108,7 @@ function StackRows({ l, i, st, save, num }: { l: CopperLayer; i: number; st: Sta
 }
 
 function ImpedanceCalc() {
-  const { design } = useEditor();
+  const { design, toast } = useEditor();
   const b = design.board;
   const layers = copperLayers(b);
   const [layer, setLayer] = useState<CopperLayer>("top");
@@ -120,6 +121,23 @@ function ImpedanceCalc() {
   const zd = diffImpedance(b, l, width, gap);
   const wFor = widthForImpedance(b, l, target);
   const gFor = gapForDiffImpedance(b, l, width, targetDiff);
+  // Field solver results for exactly these inputs (cleared when anything changes).
+  const key = JSON.stringify([b.layers, b.thickness, b.stackup, l, width, gap, target, targetDiff]);
+  const [solved, setSolved] = useState<{ key: string; single: FieldSolution; pair: FieldSolution; ms: number } | null>(null);
+  const [solvedWidth, setSolvedWidth] = useState<{ key: string; w: number | null; wd: number | null } | null>(null);
+  const [busy, setBusy] = useState("");
+  const run = async (what: string, f: () => Promise<void>) => {
+    setBusy(what);
+    try {
+      await f();
+    } catch (e) {
+      toast((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const fs = solved?.key === key ? solved : null;
+  const fw = solvedWidth?.key === key ? solvedWidth : null;
   return (
     <div style={{ borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 8 }}>
       <h4 style={{ margin: "0 0 6px" }}>Impedance</h4>
@@ -148,8 +166,58 @@ function ImpedanceCalc() {
         <span>{gFor ? <button className="ghost small" onClick={() => setGap(gFor)}>gap = {gFor.toFixed(3)} mm</button> : "not reachable at this width"}</span>
       </div>
       <p className="muted small" style={{ margin: "6px 0 0" }}>
-        IPC-2141 closed-form estimates (±10%); confirm final widths with your fabricator.
+        IPC-2141 closed-form estimates (±10%). The field solver computes the real cross-section (copper thickness, soldermask, each dielectric) to about 1%.
       </p>
+      <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+        <button
+          className="small"
+          disabled={!!busy}
+          onClick={() =>
+            run("solve", async () => {
+              const t0 = performance.now();
+              const [single, pair] = await Promise.all([solveImpedance(b, l, width), solveImpedance(b, l, width, gap)]);
+              setSolved({ key, single, pair, ms: performance.now() - t0 });
+            })
+          }
+        >
+          {busy === "solve" ? "Solving…" : "Field-solve"}
+        </button>
+        <button
+          className="small"
+          disabled={!!busy}
+          onClick={() =>
+            run("width", async () => {
+              const [w, wd] = await Promise.all([solveWidth(b, l, target, undefined, wFor ?? width), solveWidth(b, l, targetDiff, gap, width)]);
+              setSolvedWidth({ key, w, wd });
+            })
+          }
+        >
+          {busy === "width" ? "Solving…" : "Field-solve widths"}
+        </button>
+      </div>
+      {fs && (
+        <div className="imp-grid small field-result">
+          <label>Z₀</label>
+          <b>{fs.single.z0.toFixed(2)} Ω</b>
+          <span className="muted">εeff {fs.single.eeff.toFixed(3)}</span>
+          <label>Zdiff</label>
+          <b>{fs.pair.zdiff!.toFixed(2)} Ω</b>
+          <span className="muted">odd {fs.pair.zodd!.toFixed(1)} · even {fs.pair.zeven!.toFixed(1)} · Zcm {fs.pair.zcommon!.toFixed(1)}</span>
+          <span className="muted" style={{ gridColumn: "1 / -1" }}>
+            {fs.single.nodes.toLocaleString()} mesh nodes · {Math.round(fs.ms)} ms
+          </span>
+        </div>
+      )}
+      {fw && (
+        <div className="imp-grid small field-result">
+          <label>{target} Ω</label>
+          <span>{fw.w ? <button className="ghost small" onClick={() => setWidth(fw.w!)}>w = {fw.w.toFixed(4)} mm</button> : "out of range"}</span>
+          <span className="muted">field-solved</span>
+          <label>{targetDiff} Ω diff</label>
+          <span>{fw.wd ? <button className="ghost small" onClick={() => setWidth(fw.wd!)}>w = {fw.wd.toFixed(4)} mm</button> : "out of range"}</span>
+          <span className="muted">at gap {gap} mm</span>
+        </div>
+      )}
     </div>
   );
 }
