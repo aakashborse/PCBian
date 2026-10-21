@@ -1,6 +1,6 @@
 # PCBian
 
-PCBian is a browser-based, AI-assisted, real-time collaborative PCB design tool. You draw a schematic, lay out and route a two-layer board, check it, and export fabrication files, with a Claude-powered copilot that can read and edit the design alongside you.
+PCBian is a browser-based, AI-assisted, real-time collaborative PCB design tool. You draw a schematic, lay out and route a board of up to 32 layers, check and analyse it, and release fabrication files, with a Claude-powered copilot that can read and edit the design alongside you.
 
 It is an original implementation inspired by the *category* of tools like Flux.ai. No code, assets or branding were taken from any other product (see [docs/REA-NOTES.md](docs/REA-NOTES.md)).
 
@@ -8,15 +8,17 @@ It is an original implementation inspired by the *category* of tools like Flux.a
 
 The full KiCad/Altium comparison, with status and roadmap, is in [docs/FEATURES.md](docs/FEATURES.md).
 
-- **Schematic**: parts library with search, hierarchical sheets with sheet symbols, global/local/hierarchical labels, buses, mirror, click-to-wire, power symbols, notes, sheet frame and title block, no-connect flags, annotation, assembly variants, net highlighting.
-- **Parts**: parametric footprints (chip, SOIC, DIP, QFP, SOT, headers, mounting holes, fiducials…), a pin-list part builder, a part editor (pin table with pin types, drag-and-drop footprint pads), and KiCad `.kicad_sym` + `.kicad_mod` import.
-- **PCB**: 2–32 layer boards with a dielectric stackup and impedance calculator, blind/buried/micro vias, polygon or rounded outlines and cutouts, interactive routing with 45° snapping and layer switching (automatic vias), copper pours (solid or hatched, with priority) with thermal reliefs and island removal, differential pairs, length tuning with meanders, push-and-shove routing, keepouts, teardrops, measure and dimensions, net classes (width, clearance, via size), footprints on either side.
+- **Schematic**: parts library with search, hierarchical sheets with sheet symbols, repeated channels (a template sheet with synced copies), multi-unit parts placed unit by unit, global/local/hierarchical labels, buses, mirror, click-to-wire, power symbols, notes, sheet frame and title block, no-connect flags, annotation, assembly variants, net highlighting.
+- **Parts**: parametric footprints (chip, SOIC, DIP, QFP, SOT, headers, mounting holes, fiducials…), a pin-list part builder, a part editor (pin table with pin types, free-hand symbol drawing, drag-and-drop footprint pads, a STEP model per footprint), KiCad `.kicad_sym` + `.kicad_mod` import, and live Mouser stock, price and lifecycle in the BOM.
+- **PCB**: 2–32 layer boards with a dielectric stackup, closed-form and field-solved impedance, blind/buried/micro vias, polygon or rounded outlines and cutouts, parts at any angle, interactive routing with 45° snapping and layer switching (automatic vias), copper pours (solid or hatched, with priority) with thermal reliefs and island removal, differential pairs, length tuning with meanders, push-and-shove for traces and vias, keepouts, teardrops, measure and dimensions, net classes, a custom rule language, footprints on either side, and layout replication for repeated channels.
 - **Auto-place and auto-route**: connectivity-aware placement (connectors on edges, decoupling caps by their IC) and a multi-layer A* router that routes differential pairs coupled and can use blind vias on a clearance distance field. It handles net classes, adapts its grid to fine-pitch parts and narrows wide traces at small pads.
-- **Checks**: ERC (pin-type conflicts such as shorted outputs and undriven inputs, unconnected pins, single-pin nets, no-connect misuse, duplicate refs, hierarchy) and DRC (shorts, net-class clearance, unrouted nets, outline and edge clearance, keepouts, courtyards, layers, via drill/annular ring, trace widths, silk over pads, mask slivers, acid traps).
-- **Simulation**: DC operating point, transient, AC, DC sweeps and parameter steps with charts (R, C, L, diodes/LEDs, NPN/PNP, N/P-MOSFET, LM358, NE555, AMS1117; imported SPICE .model cards; DC/PULSE/SIN/AC sources or supplies from rail names), with LED-current, resistor-power and fuse warnings.
-- **3D viewer**: three.js shaped board with copper, pours, vias, holes and package-shaped component bodies.
-- **Manufacturing and interop**: Gerber RS-274X for every copper layer (pours as regions), mask, paste and silkscreen with reference text, Excellon drill, BOM, pick-and-place, fab notes with the stackup, schematic PDF/SVG and assembly PDF, STEP 3D model, IPC-2581, ODB++, KiCad `.kicad_pcb` and netlist export; import of KiCad projects, EAGLE schematics and boards, and Altium `.PcbDoc` boards.
-- **Autonomous AI copilot**: Claude can do everything in the editor through 47 tools. Given a spec, it plans, creates missing parts, draws a hierarchical schematic, simulates (DC, transient, AC), sets up layers and net classes, places, pours, routes and repeats until ERC/DRC are clean, then runs a fabrication-readiness check. Everyone sees it work live, and it can be stopped at any time.
+- **Checks**: ERC (pin-type conflicts such as shorted outputs and undriven inputs, unconnected pins, single-pin nets, no-connect misuse, duplicate refs, hierarchy) and DRC (shorts, net-class and custom-rule clearance, unrouted nets, outline and edge clearance, keepouts, courtyards, layers, via drill/annular ring, trace widths, silk over pads, mask slivers, acid traps, pour-to-pour shorts).
+- **Simulation**: DC operating point, transient, AC, DC sweeps and parameter steps with charts (R, C, L, diodes/LEDs, BJTs, MOSFETs, LM358, NE555, AMS1117; imported SPICE .model cards and .subckt macromodels with controlled sources; DC/PULSE/SIN/AC sources or supplies from rail names), with LED-current, resistor-power and fuse warnings.
+- **Analysis**: signal integrity (impedance along each route, delay, reference-plane gaps, crosstalk), power integrity (DC IR drop through traces, vias and pours; trace current capacity; decoupling placement) and a steady-state board temperature map.
+- **3D and MCAD**: three.js shaped board with copper, pours, vias, holes and uploaded STEP models (or package-shaped bodies); an enclosure generator (base and lid, standoffs, connector openings) exported as STEP with the board inside.
+- **Manufacturing and interop**: Gerber RS-274X for every copper layer, mask, paste and silkscreen, Excellon drill, BOM (optionally priced), pick-and-place, fab notes with the stackup, schematic PDF/SVG and assembly PDF, STEP assembly, IPC-2581, ODB++, KiCad `.kicad_pcb` and netlist export, panelization (tabs and mouse bites or V-score, rails, fiducials); import of KiCad projects, EAGLE schematics and boards, and Altium `.SchDoc` schematics and `.PcbDoc` boards. Independent checkers in `tools/fabcheck` verify Gerber/drill and ODB++ outputs against the design.
+- **Releases**: a release stamps the revision, freezes the whole manufacturing package with its check results, and is approved or rejected by named reviewers.
+- **Autonomous AI copilot**: Claude can do everything in the editor through 63 tools. Given a spec, it plans, creates missing parts, draws a hierarchical schematic, simulates (DC, transient, AC, subcircuits), sets up layers and net classes, places, pours, routes and repeats until ERC/DRC are clean, reviews signal/power integrity and thermals, then checks release readiness. Everyone sees it work live, and it can be stopped at any time.
 - **Real-time collaboration**: Yjs CRDT over WebSockets, live cursors, presence, per-user undo/redo, review comments pinned on the design, and version history with diffs, restore and branching.
 
 ## Quick start
@@ -43,7 +45,10 @@ Everything except the copilot works without an API key. Projects are stored unde
 | `ANTHROPIC_API_KEY` | Enables the AI copilot |
 | `PCBIAN_MODEL` | Copilot model (default `claude-opus-5-5`) |
 | `PORT` | Server port (default `8787`) |
-| `PCBIAN_DATA_DIR` | Where projects are stored (default `./data`) |
+| `PCBIAN_DATA_DIR` | Where projects, uploaded models and releases are stored (default `./data`) |
+| `MOUSER_API_KEY` | Live stock, price and lifecycle in the BOM panel |
+
+To run it on a server with Docker and automatic backups, see [deploy/README.md](deploy/README.md).
 
 ## Using the editor
 
@@ -71,6 +76,14 @@ Differential pairs, length groups, the stackup and impedance calculator are in t
 | `Esc` | Cancel wire / placement | Finish route / back to select |
 | `Ctrl+Z`, `Ctrl+Shift+Z` | Undo / redo your own edits | same |
 
+**Repeated channels**: on a sheet's tab, ⧉ repeats it as channels (CH2, CH3…). Edit the template sheet; the channel sheets follow (they are read-only, or **Detach** one to edit it on its own). In the PCB, place one part of each channel and use **Replicate layout** in the Inspector to copy the template's placement and routing. **Multi-unit parts** (dual op-amps, logic gates) show a Units row in the Inspector; each unit moves and rotates on its own.
+
+**Part editor**: the Symbol tab's **Draw** mode draws the body (lines, polygons, rectangles, circles, text) and places pins by hand; the Footprint tab takes a **STEP model** (offset and rotation) for the 3D view and STEP export.
+
+**Analysis** (right panel) runs signal integrity, IR drop and decoupling, and thermal analysis. The stackup card's **Field-solve** buttons compute impedance (and widths for a target) with the 2D solver. The **BOM** tab looks up stock, prices and lifecycle at a build quantity (needs `MOUSER_API_KEY`).
+
+**Export** also offers **Panel…** (array, tabs or V-score, rails; live preview and zip) and **Enclosure…** (base and lid STEP; can be shown in the 3D view). **History** holds releases: **Request release…** freezes the package and asks the named approvers, who approve or reject it there.
+
 Share a project by copying its URL (the **Share** button); everyone with the link edits the same live document.
 
 ## Architecture
@@ -94,10 +107,12 @@ The copilot (`apps/server/src/copilot.ts`) runs a streaming manual tool loop aga
 ## Development
 
 ```bash
-npm test          # vitest: netlist and hierarchy, routing (pairs, blind vias, tuning, shove), pours, DRC/ERC, simulation, KiCad/EAGLE/Altium import, PDFs, STEP/IPC-2581/ODB++, history
+npm test          # vitest: netlist and hierarchy, channels and units, routing (pairs, blind vias, tuning, shove), pours, DRC/ERC and rules, simulation and subcircuits, field solver, SI/PI/thermal, panels, enclosures, releases, KiCad/EAGLE/Altium import, PDFs, STEP/IPC-2581/ODB++, history
 npm run typecheck
+npm run fabcheck -- out/board data/projects/<id>.ydoc   # independent Gerber/drill and ODB++ checks (tools/fabcheck/README.md)
+npx tsx tools/loadtest/collab.ts --url http://localhost:8787 --clients 20   # multi-user convergence test
 ```
 
 ## Current limitations
 
-See [docs/FEATURES.md](docs/FEATURES.md) for the full list and roadmap. The main gaps compared with KiCad/Altium: no accounts or permissions (anyone with a project link can edit it); no supplier pricing/stock; Altium schematics (`.SchDoc`) are not imported yet, and Altium boards with copper at non-90° angles are approximated; push-and-shove moves traces only (not vias or pads); impedance uses closed-form IPC-2141 estimates rather than a field solver; ODB++ output follows the published format but has not been checked in a commercial CAM viewer; the symbol editor edits pins rather than free-hand graphics; no native repeated sheet channels or custom rule language; block-shaped 3D bodies.
+See [docs/FEATURES.md](docs/FEATURES.md) for the full list. The main gaps compared with KiCad/Altium: no accounts or permissions (anyone with a project link can edit it, and release approvers are identified by display name); behavioural SPICE sources (B elements, VALUE/TABLE expressions) are not simulated; the built-in library is small (import KiCad parts for more); ODB++ output follows the published format and passes the independent checker but has not been opened in a commercial CAM viewer; panel tabs follow the board's bounding box, so shaped boards may need their tabs checked; analyses are first-order engineering models (quasi-static field solver, DC IR drop, steady-state 2D thermal), not full-wave or CFD tools.
